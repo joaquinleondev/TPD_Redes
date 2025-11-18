@@ -137,7 +137,6 @@ int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
     if (recv_seq != expected_ack_seq) {
       printf("Número de secuencia incorrecto: %d (esperaba %d), ignorando\n",
              recv_seq, expected_ack_seq);
-      retries++;
       continue;
     }
 
@@ -149,9 +148,7 @@ int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
       printf("Mensaje del servidor: %.*s\n", (int)(recv_len - 2),
              recv_buffer + 2);
       // Si hay payload, podría ser un error
-      if (type == TYPE_HELLO || type == TYPE_WRQ) {
-        return -1; // Error en autenticación o WRQ
-      }
+      return -1; // Error en autenticación o WRQ
     }
 
     return 0; // Éxito
