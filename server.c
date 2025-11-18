@@ -19,7 +19,8 @@
 #include <unistd.h>
 
 #define SERVER_PORT 20252
-#define MAX_DATA_SIZE 1478
+#define MAX_DATA_SIZE                                                          \
+  1470 // 1500 MTU - IP header (20) - UDP header (8) - PDU header (2) = 1470
 #define MAX_PDU_SIZE (2 + MAX_DATA_SIZE)
 #define MAX_CLIENTS 10    // Definir según necesidad
 #define CLIENT_TIMEOUT 60 // Timeout de inactividad en segundos
@@ -203,7 +204,7 @@ void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
   ClientSession *session = find_or_create_session(addr);
   if (!session) {
     printf("Sin espacio para nuevos clientes\n");
-    return; // Descartar silenciosamente
+    return;
   }
 
   // Validar sequence number
@@ -212,7 +213,18 @@ void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     return;
   }
 
-  // Extraer credenciales
+  // Si la sesión no está en IDLE, tratamos como posible retransmisión
+  if (session->state != STATE_IDLE) {
+    if (session->has_last_ack && session->last_ack_seq == 0) {
+      printf("HELLO duplicado, reenviando ACK\n");
+      send_ack(sockfd, addr, 0, NULL);
+    } else {
+      printf("HELLO recibido en estado incorrecto, descartando\n");
+    }
+    return;
+  }
+
+  // Solo aquí extraemos / mostramos credenciales porque el estado es válido
   char credentials[256];
   size_t cred_len = (data_len < 255) ? data_len : 255;
   memcpy(credentials, data, cred_len);
@@ -220,29 +232,19 @@ void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
 
   printf("Autenticación recibida: '%s'\n", credentials);
 
-  if (session->state == STATE_IDLE) {
-    // Validar credenciales
-    if (!is_valid_credential(credentials)) {
-      send_ack(sockfd, addr, 0, "Invalid credentials");
-      cleanup_session(session);
-      return;
-    }
-
-    // Autenticación exitosa
-    session->state = STATE_AUTHENTICATED;
-    session->expected_seq = 1; // Siguiente debe ser WRQ con seq=1
-    session->last_ack_seq = 0;
-    session->has_last_ack = 1;
-    send_ack(sockfd, addr, 0, NULL);
-  } else {
-    // Posible retransmisión de HELLO, reenviar ACK previo
-    if (session->has_last_ack && session->last_ack_seq == 0) {
-      printf("HELLO duplicado, reenviando ACK\n");
-      send_ack(sockfd, addr, 0, NULL);
-    } else {
-      printf("HELLO recibido en estado incorrecto, descartando\n");
-    }
+  // Validar credenciales
+  if (!is_valid_credential(credentials)) {
+    send_ack(sockfd, addr, 0, "Invalid credentials");
+    cleanup_session(session);
+    return;
   }
+
+  // Autenticación exitosa
+  session->state = STATE_AUTHENTICATED;
+  session->expected_seq = 1; // Siguiente debe ser WRQ con seq=1
+  session->last_ack_seq = 0;
+  session->has_last_ack = 1;
+  send_ack(sockfd, addr, 0, NULL);
 }
 
 // Manejar PDU WRQ
@@ -262,13 +264,15 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
   // Extraer filename
   char filename[256];
   size_t fn_len = 0;
-  for (size_t i = 0; i < data_len && i < 255; i++) {
+  size_t i;
+
+  for (i = 0; i < data_len && i < 255; i++) {
     if (data[i] == '\0') {
-      fn_len = i;
-      break;
+      break; // terminador recibido
     }
-    filename[i] = data[i];
+    filename[i] = (char)data[i];
   }
+  fn_len = i; // si no hubo '\0', usamos i como largo
   filename[fn_len] = '\0';
 
   printf("Solicitud de escritura: '%s'\n", filename);
@@ -280,9 +284,9 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       return;
     }
 
-    // Validar caracteres permitidos (evitar traversal)
-    for (size_t i = 0; i < fn_len; i++) {
-      unsigned char c = (unsigned char)filename[i];
+    // Validar caracteres ASCII permitidos
+    for (size_t j = 0; j < fn_len; j++) {
+      unsigned char c = (unsigned char)filename[j];
       if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
             (c >= 'a' && c <= 'z') || c == '_' || c == '-' || c == '.')) {
         send_ack(sockfd, addr, 1, "Invalid filename characters");
@@ -313,6 +317,7 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     session->has_last_ack = 1;
     session->last_ack_seq = 1;
     send_ack(sockfd, addr, 1, NULL);
+
   } else if (session->state == STATE_READY_TO_TRANSFER ||
              session->state == STATE_TRANSFERRING) {
     // Posible WRQ duplicado: comprobar que el filename coincide
@@ -367,12 +372,15 @@ void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     session->last_ack_seq = seq_num;
     session->has_last_ack = 1;
   } else {
-    printf("Seq num incorrecto: recibido=%d, esperado=%d\n", seq_num,
-           session->expected_seq);
-    // Posible retransmisión: reenviar último ACK conocido
+    // ¿Es un DATA duplicado (retransmisión)?
     if (session->has_last_ack && seq_num == session->last_ack_seq) {
-      printf("DATA duplicado, reenviando ACK previo\n");
+      printf("DATA duplicado (Seq=%d), reenviando ACK previo\n", seq_num);
       send_ack(sockfd, addr, session->last_ack_seq, NULL);
+    } else {
+      // Seq realmente inesperado
+      printf("Seq num incorrecto: recibido=%d, esperado=%d\n", seq_num,
+             session->expected_seq);
+      // aquí simplemente lo descartás
     }
   }
 }
