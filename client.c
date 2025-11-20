@@ -16,9 +16,9 @@
 #include <unistd.h>
 
 #define SERVER_PORT 20252
-#define MAX_DATA_SIZE 1478
+#define MAX_DATA_SIZE 1470
 #define MAX_PDU_SIZE (2 + MAX_DATA_SIZE)
-#define TIMEOUT_SEC 2
+#define TIMEOUT_SEC 3
 #define MAX_RETRIES 5
 
 // PDU Types
@@ -187,14 +187,14 @@ int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
 
   size_t filename_len = strlen(filename);
 
-  // Validar longitud del filename (4-10 caracteres)
-  if (filename_len < 4 || filename_len > 10) {
-    fprintf(stderr, "Filename debe tener entre 4 y 10 caracteres\n");
+  // Validar longitud del filename (4-100 caracteres)
+  if (filename_len < 4 || filename_len > 100) {
+    fprintf(stderr, "Filename debe tener entre 4 y 100 caracteres\n");
     return -1;
   }
 
   // Enviar filename con null terminator
-  uint8_t buffer[12]; // 10 chars + null + margen
+  uint8_t buffer[102]; // 100 chars + null + margen
   strcpy((char *)buffer, filename);
 
   if (send_pdu_with_retry(sockfd, server_addr, TYPE_WRQ, 1, buffer,
@@ -274,6 +274,10 @@ int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
   size_t filename_len = strlen(filename);
 
   uint8_t buffer[12];
+  if (filename_len >= sizeof(buffer)) {
+    fprintf(stderr, "Filename too long for finalize buffer\n");
+    return -1;
+  }
   strcpy((char *)buffer, filename);
 
   if (send_pdu_with_retry(sockfd, server_addr, TYPE_FIN, next_seq, buffer,
@@ -287,19 +291,24 @@ int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 4) {
-    fprintf(stderr, "Uso: %s <server_ip> <filename> <credentials>\n", argv[0]);
-    fprintf(stderr, "Ejemplo: %s 192.168.1.100 test.txt mi_credencial\n",
+  if (argc != 5) {
+    fprintf(
+        stderr,
+        "Uso: %s <server_ip> <credencial> <filename_local> <filename_remoto>\n",
+        argv[0]);
+    fprintf(stderr,
+            "Ejemplo: %s 192.168.1.100 mi_credencial local.txt remoto.txt\n",
             argv[0]);
     return 1;
   }
 
   const char *server_ip = argv[1];
-  const char *filename = argv[2];
-  const char *credentials = argv[3];
+  const char *credentials = argv[2];
+  const char *filename_local = argv[3];
+  const char *filename_remoto = argv[4];
 
   // Abrir archivo
-  FILE *file = fopen(filename, "rb");
+  FILE *file = fopen(filename_local, "rb");
   if (!file) {
     perror("fopen");
     return 1;
@@ -345,7 +354,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Fase 2: WRQ
-  if (phase_wrq(sockfd, &server_addr, filename) < 0) {
+  if (phase_wrq(sockfd, &server_addr, filename_remoto) < 0) {
     result = 1;
     goto cleanup;
   }
@@ -358,7 +367,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Fase 4: FIN
-  if (phase_finalize(sockfd, &server_addr, filename, last_seq) < 0) {
+  if (phase_finalize(sockfd, &server_addr, filename_remoto, last_seq) < 0) {
     result = 1;
     goto cleanup;
   }

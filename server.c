@@ -1,9 +1,3 @@
-/*
- * Servidor UDP Stop & Wait File Transfer Protocol
- * Compilar: gcc -Wall -Wextra -o server udp_server.c
- * Uso: ./server <credentials_file>
- */
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -262,18 +256,23 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
   }
 
   // Extraer filename
-  char filename[256];
+  char filename[10];
   size_t fn_len = 0;
   size_t i;
 
-  for (i = 0; i < data_len && i < 255; i++) {
+  for (i = 0; i < data_len && i <= 9; i++) {
     if (data[i] == '\0') {
       break; // terminador recibido
     }
     filename[i] = (char)data[i];
   }
-  fn_len = i; // si no hubo '\0', usamos i como largo
-  filename[fn_len] = '\0';
+  fn_len = i; // si no hubo '\0'
+  // Si filename[fn_len] no es '\0', el filename es demasiado largo por lo tanto
+  // debo mandar el ack con error
+  if (fn_len == 10 && data[9] != '\0') {
+    send_ack(sockfd, addr, 1, "Filename length must be 4-10 chars");
+    return;
+  }
 
   printf("Solicitud de escritura: '%s'\n", filename);
 
@@ -294,16 +293,9 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       }
     }
 
-    // Crear directorio si no existe
-    if (mkdir("uploads", 0755) < 0 && errno != EEXIST) {
-      perror("mkdir uploads");
-      send_ack(sockfd, addr, 1, "Server error");
-      return;
-    }
-
     // Abrir archivo
     char filepath[512];
-    snprintf(filepath, sizeof(filepath), "uploads/%s", filename);
+    snprintf(filepath, sizeof(filepath), "%s", filename);
     session->file = fopen(filepath, "wb");
 
     if (!session->file) {
@@ -360,8 +352,8 @@ void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       session->bytes_received += written;
     }
 
-    printf("DATA recibido: %zu bytes (total: %zu), Seq=%d\n", data_len,
-           session->bytes_received, seq_num);
+    // printf("DATA recibido: %zu bytes (total: %zu), Seq=%d\n", data_len,
+    //        session->bytes_received, seq_num);
 
     // Enviar ACK para nuevo DATA
     send_ack(sockfd, addr, seq_num, NULL);
@@ -455,7 +447,6 @@ int main(int argc, char *argv[]) {
   if (load_credentials(argv[1]) < 0) {
     return 1;
   }
-
   // Inicializar pool de clientes
   memset(clients, 0, sizeof(clients));
 
@@ -524,8 +515,8 @@ int main(int argc, char *argv[]) {
 
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
-    printf("\n[%s:%d] PDU recibida: Type=%d, Seq=%d, DataLen=%zu\n", ip,
-           ntohs(client_addr.sin_port), type, seq_num, data_len);
+    // printf("\n[%s:%d] PDU recibida: Type=%d, Seq=%d, DataLen=%zu\n", ip,
+    //        ntohs(client_addr.sin_port), type, seq_num, data_len);
 
     // Procesar según tipo
     switch (type) {
