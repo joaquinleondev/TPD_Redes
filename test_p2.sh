@@ -6,10 +6,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+OUTDIR="test_p2_outputs"
+
 echo "=== Pruebas TCP One-Way Delay ==="
 
-# Limpiar artefactos previos
-rm -f one_way_delay_*.csv tcp_server_*.log
+# Limpiar artefactos previos de esta carpeta
+rm -rf "${OUTDIR}"
+mkdir -p "${OUTDIR}"
 
 # Verificar compilación
 if [ ! -x "tcp_client" ] || [ ! -x "tcp_server" ]; then
@@ -46,8 +49,8 @@ wait_server() {
 ########################################################################
 echo -e "\n${YELLOW}Prueba 1: corrida básica (d=50 ms, N=3 s)${NC}"
 
-CSV1="one_way_delay_p1.csv"
-LOG1="tcp_server_p1.log"
+CSV1="${OUTDIR}/one_way_delay_p1.csv"
+LOG1="${OUTDIR}/tcp_server_p1.log"
 
 start_server "$CSV1" "$LOG1"
 
@@ -82,10 +85,10 @@ echo -e "${GREEN}✓ CSV generado con ${MEAS} mediciones en Prueba 1${NC}"
 ########################################################################
 echo -e "\n${YELLOW}Prueba 2: comparación de densidad (d=50 ms vs d=10 ms, N=2 s)${NC}"
 
-CSV_SLOW="one_way_delay_slow.csv"
-CSV_FAST="one_way_delay_fast.csv"
-LOG_SLOW="tcp_server_slow.log"
-LOG_FAST="tcp_server_fast.log"
+CSV_SLOW="${OUTDIR}/one_way_delay_slow.csv"
+CSV_FAST="${OUTDIR}/one_way_delay_fast.csv"
+LOG_SLOW="${OUTDIR}/tcp_server_slow.log"
+LOG_FAST="${OUTDIR}/tcp_server_fast.log"
 
 # Caso "lento"
 start_server "$CSV_SLOW" "$LOG_SLOW"

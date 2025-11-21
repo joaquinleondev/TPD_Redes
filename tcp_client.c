@@ -6,7 +6,7 @@
  *
  * Ejemplo: ./tcp_client 192.168.0.10 -d 50 -N 10
  */
-#include <time.h>      // <-- agregar
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SERVER_PORT 20252
@@ -199,9 +200,11 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        // Esperar d_ms milisegundos antes de mandar la próxima
-        useconds_t sleep_us = (useconds_t)d_ms * 1000U;
-        usleep(sleep_us);
+        // Esperar d_ms milisegundos antes de mandar la próxima (nanosleep)
+        struct timespec ts;
+        ts.tv_sec  = d_ms / 1000;
+        ts.tv_nsec = (long)(d_ms % 1000) * 1000000L;  // ms -> ns
+        nanosleep(&ts, NULL);
     }
 
     free(pdu);
