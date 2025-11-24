@@ -39,5 +39,3 @@ typedef struct {
 } PDU;
 
 #endif // UDP_PROTOCOL_H
-
-

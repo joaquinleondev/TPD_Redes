@@ -248,17 +248,9 @@ static int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
   printf("\n=== FASE 4: FINALIZACIÓN ===\n");
 
   uint8_t next_seq = 1 - last_seq; // Incrementar seq_num
-  size_t filename_len = strlen(filename);
 
-  uint8_t buffer[12];
-  if (filename_len >= sizeof(buffer)) {
-    fprintf(stderr, "Filename too long for finalize buffer\n");
-    return -1;
-  }
-  strcpy((char *)buffer, filename);
-
-  if (send_pdu_with_retry(sockfd, server_addr, TYPE_FIN, next_seq, buffer,
-                          filename_len + 1, next_seq) < 0) {
+  if (send_pdu_with_retry(sockfd, server_addr, TYPE_FIN, next_seq, NULL, 0,
+                          next_seq) < 0) {
     fprintf(stderr, "Error en fase de finalización\n");
     return -1;
   }
@@ -270,8 +262,7 @@ static int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
 int main(int argc, char *argv[]) {
   if (argc != 4) {
     fprintf(stderr, "Uso: %s <server_ip> <filename> <credencial>\n", argv[0]);
-    fprintf(stderr,
-            "Ejemplo: %s 127.0.0.1 test.bin test_credential\n",
+    fprintf(stderr, "Ejemplo: %s 127.0.0.1 test.bin test_credential\n",
             argv[0]);
     return 1;
   }
@@ -354,5 +345,3 @@ cleanup:
   fclose(file);
   return result;
 }
-
-

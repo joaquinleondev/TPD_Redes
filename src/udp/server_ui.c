@@ -86,9 +86,23 @@ static WINDOW *win_logs = NULL;
 // Flag para actualización de UI
 static volatile int ui_needs_update = 1;
 
+// Log de servidor (archivo)
+static FILE *server_log_file = NULL;
+
 // Agregar entrada al log
 static void add_log(const char *message, int color_pair) {
-  log_buffer[log_head].timestamp = time(NULL);
+  time_t now = time(NULL);
+  
+  // Escribir en archivo
+  if (server_log_file) {
+    char time_str[64];
+    struct tm *tm_info = localtime(&now);
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+    fprintf(server_log_file, "[%s] %s\n", time_str, message);
+    fflush(server_log_file);
+  }
+
+  log_buffer[log_head].timestamp = now;
   strncpy(log_buffer[log_head].message, message, 255);
   log_buffer[log_head].message[255] = '\0';
   log_buffer[log_head].color_pair = color_pair;
@@ -728,6 +742,14 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  printf("Máximo de clientes concurrentes: %d\n", MAX_CLIENTS);
+
+  // Abrir log file
+  server_log_file = fopen("server.log", "a");
+  if (!server_log_file) {
+    perror("fopen server.log");
+  }
+
   // Inicializar estadísticas
   stats.server_start_time = time(NULL);
 
@@ -860,6 +882,10 @@ int main(int argc, char *argv[]) {
 
   close(sockfd);
   cleanup_ui();
+
+  if (server_log_file) {
+    fclose(server_log_file);
+  }
 
   printf("\n¡Servidor cerrado!\n");
   return 0;

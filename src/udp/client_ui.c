@@ -263,16 +263,14 @@ static int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
     // ACK válido recibido
     if (recv_len > 2) {
       // Hay mensaje del servidor (probablemente error)
-      if (type == TYPE_HELLO || type == TYPE_WRQ) {
-        char error_msg[256];
-        size_t msg_len = (size_t)(recv_len - 2);
-        if (msg_len > 255)
-          msg_len = 255;
-        memcpy(error_msg, recv_buffer + 2, msg_len);
-        error_msg[msg_len] = '\0';
-        show_error(error_msg);
-        return -1;
-      }
+      char error_msg[256];
+      size_t msg_len = (size_t)(recv_len - 2);
+      if (msg_len > 255)
+        msg_len = 255;
+      memcpy(error_msg, recv_buffer + 2, msg_len);
+      error_msg[msg_len] = '\0';
+      show_error(error_msg);
+      return -1;
     }
 
     return 0;
@@ -309,12 +307,12 @@ static int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
 
   size_t filename_len = strlen(filename);
 
-  if (filename_len < 4 || filename_len > 10) {
-    show_error("Filename debe tener entre 4 y 10 caracteres");
+  if (filename_len < 4 || filename_len > 100) {
+    show_error("Filename debe tener entre 4 y 100 caracteres");
     return -1;
   }
 
-  uint8_t buffer[12];
+  uint8_t buffer[102];
   strcpy((char *)buffer, filename);
 
   if (send_pdu_with_retry(sockfd, server_addr, TYPE_WRQ, 1, buffer,
