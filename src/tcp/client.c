@@ -21,16 +21,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "common.h"
-
 #define SERVER_PORT 20252
 
 #define MIN_PAYLOAD_SIZE 500
 #define MAX_PAYLOAD_SIZE 1000
 #define DEFAULT_PAYLOAD_SIZE 800 // cualquier valor entre 500 y 1000 sirve
 
-// Obtener tiempo actual en microsegundos desde epoch (1/1/1970 UTC)
-
+#include "common.h"
 
 // Enviar todos los bytes del buffer (maneja escrituras parciales)
 static int send_all(int sockfd, const uint8_t *buf, size_t len) {
@@ -63,8 +60,8 @@ static void print_usage(const char *progname) {
 }
 
 // Parsear argumentos -d y -N
-static int parse_args(int argc, char *argv[], const char **server_ip,
-                      int *d_ms, int *N_seconds) {
+static int parse_args(int argc, char *argv[], const char **server_ip, int *d_ms,
+                      int *N_seconds) {
   if (argc < 5) {
     return -1;
   }
@@ -189,7 +186,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Origin Timestamp: se toma justo antes de enviar la PDU
-    uint64_t origin_ts = get_time_us();
+    uint64_t origin_ts = current_time_ms();
     memcpy(pdu, &origin_ts, sizeof(origin_ts));
 
     // Enviar la PDU completa (manejo de escrituras parciales)
@@ -210,5 +207,3 @@ int main(int argc, char *argv[]) {
   printf("Cliente TCP finalizado.\n");
   return EXIT_SUCCESS;
 }
-
-

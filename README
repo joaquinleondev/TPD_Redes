@@ -8,30 +8,30 @@ Este repositorio contiene la resolución de dos puntos del TPD de Redes:
 ## Estructura del proyecto
 
 - **`src/`**: Código fuente.
-  - `udp/`: Implementación del cliente y servidor UDP (versiones básica y UI).
-  - `tcp/`: Implementación del cliente y servidor TCP.
-  - `common/`: Utilidades compartidas.
-- **`include/`**: Archivos de cabecera compartidos.
+  - `udp/`: Cliente y servidor UDP (`client.c`, `server.c`, `protocol.h`).
+  - `tcp/`: Cliente y servidor TCP (`client.c`, `server.c`, `common.c`, `common.h`).
 - **`tests/`**: Scripts de prueba automatizados.
 - **`bin/`**: Ejecutables compilados (generados automáticamente).
-- **`obj/`**: Archivos objeto intermedios (generados automáticamente).
-- **`Makefile`**: Sistema de construcción unificado.
+- **`Makefile`**: Sistema de construcción.
 
 ## Compilación
 
 Desde la raíz del repositorio:
 
 - **Todo el proyecto**:
+
   ```bash
-  make all
+  make
   ```
 
 - **Solo UDP**:
+
   ```bash
   make udp
   ```
 
 - **Solo TCP**:
+
   ```bash
   make tcp
   ```
@@ -47,44 +47,29 @@ Los ejecutables se generan en la carpeta `bin/`.
 
 ### Parte UDP
 
-- **Servidor sin UI**:
+- **Servidor**:
   ```bash
   ./bin/udp_server <credentials_file>
   ```
-- **Cliente sin UI**:
+- **Cliente**:
   ```bash
   ./bin/udp_client <server_ip> <filename> <credencial>
-  ```
-- **Servidor con UI (ncurses)**:
-  ```bash
-  ./bin/udp_server_ui <credentials_file>
-  ```
-- **Cliente con UI**:
-  ```bash
-  ./bin/udp_client_ui <server_ip> <filename> <credencial>
   ```
 
 ### Parte TCP
 
-- **Servidor TCP**:
+- **Servidor**:
   ```bash
   ./bin/tcp_server [output.csv]
   ```
-- **Cliente TCP**:
+- **Cliente**:
   ```bash
   ./bin/tcp_client <server_ip> -d <ms_entre_envios> -N <duracion_segundos>
   ```
 
 ## Pruebas
 
-El proyecto incluye scripts de prueba automatizados:
+El proyecto incluye scripts de prueba en `tests/`:
 
-- **Ejecutar todas las pruebas**:
-  ```bash
-  make test
-  ```
-  Esto ejecutará tanto las pruebas de UDP como las de TCP.
-
-- **Detalles de las pruebas**:
-  - `tests/test_udp.sh`: Verifica transferencia de archivos, manejo de errores (credenciales, filenames), y concurrencia.
-  - `tests/test_tcp.sh`: Verifica la generación de mediciones de delay y el formato del CSV.
+- `tests/test_udp.sh`: Pruebas de transferencia UDP.
+- `tests/test_tcp.sh`: Pruebas de medición TCP.
