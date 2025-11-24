@@ -12,29 +12,11 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SERVER_PORT 20252
-#define MAX_DATA_SIZE                                                          \
-  1470 // 1500 MTU - IP header (20) - UDP header (8) - PDU header (2) = 1470
-#define MAX_PDU_SIZE (2 + MAX_DATA_SIZE)
+#include "protocol.h"
+
 #define MAX_CLIENTS 10    // Definir según necesidad
 #define CLIENT_TIMEOUT 60 // Timeout de inactividad en segundos
 #define MAX_CREDENTIALS 100
-
-// PDU Types
-#define TYPE_HELLO 1
-#define TYPE_WRQ 2
-#define TYPE_DATA 3
-#define TYPE_ACK 4
-#define TYPE_FIN 5
-
-// Estados del cliente
-typedef enum {
-  STATE_IDLE,
-  STATE_AUTHENTICATED,
-  STATE_READY_TO_TRANSFER,
-  STATE_TRANSFERRING,
-  STATE_COMPLETED
-} ClientState;
 
 // Estructura para mantener estado de cada cliente
 typedef struct {
@@ -51,14 +33,17 @@ typedef struct {
 } ClientSession;
 
 // Lista de credenciales válidas
-char valid_credentials[MAX_CREDENTIALS][256];
-int num_credentials = 0;
+static char valid_credentials[MAX_CREDENTIALS][256];
+static int num_credentials = 0;
 
 // Pool de sesiones de clientes
-ClientSession clients[MAX_CLIENTS];
+static ClientSession clients[MAX_CLIENTS];
+
+// Log de servidor para pruebas (se escribe también por stdout redirigido)
+static FILE *server_log = NULL;
 
 // Cargar credenciales desde archivo
-int load_credentials(const char *filename) {
+static int load_credentials(const char *filename) {
   FILE *f = fopen(filename, "r");
   if (!f) {
     perror("fopen credentials");
@@ -82,7 +67,7 @@ int load_credentials(const char *filename) {
 }
 
 // Verificar si una credencial es válida
-int is_valid_credential(const char *cred) {
+static int is_valid_credential(const char *cred) {
   for (int i = 0; i < num_credentials; i++) {
     if (strcmp(valid_credentials[i], cred) == 0) {
       return 1;
@@ -92,13 +77,13 @@ int is_valid_credential(const char *cred) {
 }
 
 // Comparar direcciones de socket
-int addr_equal(struct sockaddr_in *a, struct sockaddr_in *b) {
+static int addr_equal(struct sockaddr_in *a, struct sockaddr_in *b) {
   return (a->sin_addr.s_addr == b->sin_addr.s_addr &&
           a->sin_port == b->sin_port);
 }
 
 // Encontrar o crear sesión de cliente
-ClientSession *find_or_create_session(struct sockaddr_in *addr) {
+static ClientSession *find_or_create_session(struct sockaddr_in *addr) {
   time_t now = time(NULL);
   ClientSession *free_slot = NULL;
 
@@ -134,7 +119,7 @@ ClientSession *find_or_create_session(struct sockaddr_in *addr) {
 }
 
 // Liberar recursos de una sesión
-void cleanup_session(ClientSession *session) {
+static void cleanup_session(ClientSession *session) {
   if (session->file) {
     fclose(session->file);
     session->file = NULL;
@@ -149,7 +134,7 @@ void cleanup_session(ClientSession *session) {
 }
 
 // Limpiar sesiones inactivas
-void cleanup_inactive_sessions() {
+static void cleanup_inactive_sessions(void) {
   time_t now = time(NULL);
 
   for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -162,8 +147,8 @@ void cleanup_inactive_sessions() {
 }
 
 // Enviar ACK
-void send_ack(int sockfd, struct sockaddr_in *addr, uint8_t seq_num,
-              const char *error_msg) {
+static void send_ack(int sockfd, struct sockaddr_in *addr, uint8_t seq_num,
+                     const char *error_msg) {
   uint8_t buffer[MAX_PDU_SIZE];
   size_t pdu_size = 2;
 
@@ -193,8 +178,8 @@ void send_ack(int sockfd, struct sockaddr_in *addr, uint8_t seq_num,
 }
 
 // Manejar PDU HELLO
-void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                  size_t data_len, uint8_t seq_num) {
+static void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                         size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session) {
     printf("Sin espacio para nuevos clientes\n");
@@ -242,8 +227,8 @@ void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
 }
 
 // Manejar PDU WRQ
-void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                size_t data_len, uint8_t seq_num) {
+static void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                       size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session) {
     return;
@@ -255,23 +240,31 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     return;
   }
 
-  // Extraer filename
+  // Extraer filename (máx 10 caracteres + terminador)
   char filename[10];
   size_t fn_len = 0;
   size_t i;
 
-  for (i = 0; i < data_len && i <= 9; i++) {
+  for (i = 0; i < data_len && i < sizeof(filename); i++) {
     if (data[i] == '\0') {
       break; // terminador recibido
     }
     filename[i] = (char)data[i];
   }
   fn_len = i; // si no hubo '\0'
+
   // Si filename[fn_len] no es '\0', el filename es demasiado largo por lo tanto
   // debo mandar el ack con error
-  if (fn_len == 10 && data[9] != '\0') {
+  if (fn_len == sizeof(filename) && data[fn_len - 1] != '\0') {
     send_ack(sockfd, addr, 1, "Filename length must be 4-10 chars");
     return;
+  }
+
+  // Asegurar terminación en '\0' para usarlo como string C segura
+  if (fn_len < sizeof(filename)) {
+    filename[fn_len] = '\0';
+  } else {
+    filename[sizeof(filename) - 1] = '\0';
   }
 
   printf("Solicitud de escritura: '%s'\n", filename);
@@ -293,9 +286,15 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       }
     }
 
-    // Abrir archivo
+    // Abrir archivo dentro de uploads/ para mantener todo ordenado
+    if (mkdir("uploads", 0755) < 0 && errno != EEXIST) {
+      perror("mkdir uploads");
+      send_ack(sockfd, addr, 1, "Server error");
+      return;
+    }
+
     char filepath[512];
-    snprintf(filepath, sizeof(filepath), "%s", filename);
+    snprintf(filepath, sizeof(filepath), "uploads/%s", filename);
     session->file = fopen(filepath, "wb");
 
     if (!session->file) {
@@ -321,12 +320,16 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     }
   } else {
     printf("WRQ en estado incorrecto, descartando\n");
+    if (server_log) {
+      fprintf(server_log, "WRQ en estado incorrecto\n");
+      fflush(server_log);
+    }
   }
 }
 
 // Manejar PDU DATA
-void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                 size_t data_len, uint8_t seq_num) {
+static void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                        size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session) {
     return;
@@ -336,6 +339,10 @@ void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
   if (session->state != STATE_READY_TO_TRANSFER &&
       session->state != STATE_TRANSFERRING) {
     printf("DATA sin WRQ previo, descartando\n");
+    if (server_log) {
+      fprintf(server_log, "DATA sin WRQ previo\n");
+      fflush(server_log);
+    }
     return;
   }
 
@@ -364,22 +371,27 @@ void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     session->last_ack_seq = seq_num;
     session->has_last_ack = 1;
   } else {
-    // ¿Es un DATA duplicado (retransmisión)?
+    // Seq realmente inesperado
+    printf("Seq num incorrecto: recibido=%d, esperado=%d\n", seq_num,
+           session->expected_seq);
+    if (server_log) {
+      fprintf(server_log, "Seq num incorrecto: recibido=%d, esperado=%d\n",
+              seq_num, session->expected_seq);
+      fflush(server_log);
+    }
+
+    // Si coincide con el último ACK, lo tratamos como duplicado (retransmisión)
     if (session->has_last_ack && seq_num == session->last_ack_seq) {
       printf("DATA duplicado (Seq=%d), reenviando ACK previo\n", seq_num);
       send_ack(sockfd, addr, session->last_ack_seq, NULL);
-    } else {
-      // Seq realmente inesperado
-      printf("Seq num incorrecto: recibido=%d, esperado=%d\n", seq_num,
-             session->expected_seq);
-      // aquí simplemente lo descartás
     }
+    // En cualquier otro caso, simplemente se descarta el PDU
   }
 }
 
 // Manejar PDU FIN
-void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                size_t data_len, uint8_t seq_num) {
+static void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                       size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session) {
     return;
@@ -393,7 +405,7 @@ void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       fn_len = i;
       break;
     }
-    filename[i] = data[i];
+    filename[i] = (char)data[i];
   }
   filename[fn_len] = '\0';
 
@@ -434,6 +446,10 @@ void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     }
   } else {
     printf("FIN en estado incorrecto (%d), descartando\n", session->state);
+    if (server_log) {
+      fprintf(server_log, "FIN en estado incorrecto\n");
+      fflush(server_log);
+    }
   }
 }
 
@@ -481,6 +497,12 @@ int main(int argc, char *argv[]) {
   printf("Servidor escuchando en puerto %d\n", SERVER_PORT);
   printf("Máximo de clientes concurrentes: %d\n", MAX_CLIENTS);
 
+  // Abrir log sencillo para compatibilidad con test.sh
+  server_log = fopen("server.log", "a");
+  if (!server_log) {
+    perror("fopen server.log");
+  }
+
   // Loop principal
   uint8_t buffer[MAX_PDU_SIZE];
 
@@ -511,7 +533,7 @@ int main(int argc, char *argv[]) {
     uint8_t type = buffer[0];
     uint8_t seq_num = buffer[1];
     uint8_t *data = (recv_len > 2) ? &buffer[2] : NULL;
-    size_t data_len = (recv_len > 2) ? (recv_len - 2) : 0;
+    size_t data_len = (recv_len > 2) ? (size_t)(recv_len - 2) : 0;
 
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
@@ -546,5 +568,10 @@ int main(int argc, char *argv[]) {
   }
 
   close(sockfd);
+  if (server_log) {
+    fclose(server_log);
+  }
   return 0;
 }
+
+

@@ -1,7 +1,8 @@
 /*
  * Cliente UDP Stop & Wait File Transfer Protocol - Versión con UI
- * Compilar: gcc -Wall -Wextra -o client_ui client_ui.c
- * Uso: ./client_ui <server_ip> <filename> <credentials>
+ * Uso recomendado: compilar con el Makefile del proyecto.
+ *    make client_ui
+ *    ./client_ui <server_ip> <filename> <credentials>
  */
 
 #include <arpa/inet.h>
@@ -16,18 +17,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define SERVER_PORT 20252
-#define MAX_DATA_SIZE 1478
-#define MAX_PDU_SIZE (2 + MAX_DATA_SIZE)
-#define TIMEOUT_SEC 2
-#define MAX_RETRIES 5
-
-// PDU Types
-#define TYPE_HELLO 1
-#define TYPE_WRQ 2
-#define TYPE_DATA 3
-#define TYPE_ACK 4
-#define TYPE_FIN 5
+#include "protocol.h"
 
 // Colores ANSI
 #define COLOR_RESET "\033[0m"
@@ -40,24 +30,8 @@
 #define COLOR_RED "\033[31m"
 #define COLOR_DIM "\033[2m"
 
-// Estados del cliente
-typedef enum {
-  STATE_DISCONNECTED,
-  STATE_HELLO_SENT,
-  STATE_WRQ_SENT,
-  STATE_TRANSFERRING,
-  STATE_FIN_SENT,
-  STATE_COMPLETED
-} ClientState;
-
-typedef struct {
-  uint8_t type;
-  uint8_t seq_num;
-  uint8_t data[MAX_DATA_SIZE];
-} PDU;
-
 // Estadísticas de transferencia
-struct {
+static struct {
   size_t total_bytes;
   size_t bytes_sent;
   int packets_sent;
@@ -72,16 +46,16 @@ static int addr_equal(const struct sockaddr_in *a,
 }
 
 // Obtener tamaño de archivo
-size_t get_file_size(FILE *file) {
+static size_t get_file_size(FILE *file) {
   struct stat st;
   if (fstat(fileno(file), &st) == 0) {
-    return st.st_size;
+    return (size_t)st.st_size;
   }
   return 0;
 }
 
 // Formatear bytes
-void format_bytes(size_t bytes, char *buf, size_t bufsize) {
+static void format_bytes(size_t bytes, char *buf, size_t bufsize) {
   if (bytes < 1024) {
     snprintf(buf, bufsize, "%zu B", bytes);
   } else if (bytes < 1024 * 1024) {
@@ -92,7 +66,8 @@ void format_bytes(size_t bytes, char *buf, size_t bufsize) {
 }
 
 // Calcular velocidad
-void format_speed(size_t bytes, double seconds, char *buf, size_t bufsize) {
+static void format_speed(size_t bytes, double seconds, char *buf,
+                         size_t bufsize) {
   if (seconds <= 0) {
     snprintf(buf, bufsize, "-- B/s");
     return;
@@ -110,11 +85,12 @@ void format_speed(size_t bytes, double seconds, char *buf, size_t bufsize) {
 }
 
 // Mostrar barra de progreso
-void show_progress_bar(const char *label, size_t current, size_t total) {
+static void show_progress_bar(const char *label, size_t current,
+                              size_t total) {
   int bar_width = 40;
   float progress = (total > 0) ? ((float)current / total) : 0;
-  if (progress > 1.0)
-    progress = 1.0;
+  if (progress > 1.0f)
+    progress = 1.0f;
 
   int filled = (int)(bar_width * progress);
 
@@ -162,7 +138,7 @@ void show_progress_bar(const char *label, size_t current, size_t total) {
 }
 
 // Mostrar header
-void show_header(const char *server_ip, const char *filename) {
+static void show_header(const char *server_ip, const char *filename) {
   printf("\n");
   printf(
       "%s╔══════════════════════════════════════════════════════════════╗%s\n",
@@ -180,8 +156,8 @@ void show_header(const char *server_ip, const char *filename) {
 }
 
 // Mostrar estado de fase
-void show_phase_status(const char *phase_name, const char *status,
-                       int is_success) {
+static void show_phase_status(const char *phase_name, const char *status,
+                              int is_success) {
   const char *color = is_success ? COLOR_GREEN : COLOR_YELLOW;
   const char *icon = is_success ? "✓" : "→";
 
@@ -190,13 +166,13 @@ void show_phase_status(const char *phase_name, const char *status,
 }
 
 // Mostrar error
-void show_error(const char *message) {
+static void show_error(const char *message) {
   printf("\n  %s[✗]%s %sError:%s %s\n\n", COLOR_RED, COLOR_RESET, COLOR_BOLD,
          COLOR_RESET, message);
 }
 
 // Configurar timeout del socket
-int set_socket_timeout(int sockfd, int seconds) {
+static int set_socket_timeout(int sockfd, int seconds) {
   struct timeval tv;
   tv.tv_sec = seconds;
   tv.tv_usec = 0;
@@ -209,13 +185,13 @@ int set_socket_timeout(int sockfd, int seconds) {
 }
 
 // Enviar PDU con reintentos
-int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
-                        uint8_t type, uint8_t seq_num, const uint8_t *data,
-                        size_t data_len, uint8_t expected_ack_seq,
-                        int show_progress) {
+static int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
+                               uint8_t type, uint8_t seq_num,
+                               const uint8_t *data, size_t data_len,
+                               uint8_t expected_ack_seq, int show_progress) {
   uint8_t buffer[MAX_PDU_SIZE];
   uint8_t recv_buffer[MAX_PDU_SIZE];
-  ssize_t pdu_size = 2 + data_len;
+  ssize_t pdu_size = 2 + (ssize_t)data_len;
   int retries = 0;
 
   buffer[0] = type;
@@ -229,7 +205,7 @@ int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
       transfer_stats.retransmissions++;
     }
 
-    ssize_t sent = sendto(sockfd, buffer, pdu_size, 0,
+    ssize_t sent = sendto(sockfd, buffer, (size_t)pdu_size, 0,
                           (struct sockaddr *)server_addr, sizeof(*server_addr));
 
     if (sent < 0) {
@@ -289,7 +265,7 @@ int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
       // Hay mensaje del servidor (probablemente error)
       if (type == TYPE_HELLO || type == TYPE_WRQ) {
         char error_msg[256];
-        size_t msg_len = recv_len - 2;
+        size_t msg_len = (size_t)(recv_len - 2);
         if (msg_len > 255)
           msg_len = 255;
         memcpy(error_msg, recv_buffer + 2, msg_len);
@@ -307,8 +283,8 @@ int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 1: Autenticación
-int phase_hello(int sockfd, struct sockaddr_in *server_addr,
-                const char *credentials) {
+static int phase_hello(int sockfd, struct sockaddr_in *server_addr,
+                       const char *credentials) {
   show_phase_status("FASE 1: AUTENTICACIÓN", "Enviando credenciales...", 0);
 
   size_t cred_len = strlen(credentials);
@@ -318,7 +294,7 @@ int phase_hello(int sockfd, struct sockaddr_in *server_addr,
   }
 
   if (send_pdu_with_retry(sockfd, server_addr, TYPE_HELLO, 0,
-                          (uint8_t *)credentials, cred_len, 0, 0) < 0) {
+                          (const uint8_t *)credentials, cred_len, 0, 0) < 0) {
     return -1;
   }
 
@@ -327,8 +303,8 @@ int phase_hello(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 2: Write Request
-int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
-              const char *filename) {
+static int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
+                     const char *filename) {
   show_phase_status("FASE 2: WRITE REQUEST", "Solicitando permiso...", 0);
 
   size_t filename_len = strlen(filename);
@@ -351,8 +327,8 @@ int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 3: Transferencia de datos
-int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
-                        FILE *file) {
+static int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
+                               FILE *file) {
   show_phase_status("FASE 3: TRANSFERENCIA", "Enviando datos...", 0);
   printf("\n");
 
@@ -420,11 +396,11 @@ int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 4: Finalización
-int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
-                   const char *filename, uint8_t last_seq) {
+static int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
+                          const char *filename, uint8_t last_seq) {
   show_phase_status("FASE 4: FINALIZACIÓN", "Cerrando transferencia...", 0);
 
-  uint8_t next_seq = 1 - last_seq;
+  uint8_t next_seq = (uint8_t)(1 - last_seq);
   size_t filename_len = strlen(filename);
 
   uint8_t buffer[12];
@@ -440,7 +416,7 @@ int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Mostrar resumen final
-void show_summary() {
+static void show_summary(void) {
   struct timeval now;
   gettimeofday(&now, NULL);
   double elapsed =
@@ -548,7 +524,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Fase 4: FIN
-  if (phase_finalize(sockfd, &server_addr, filename, last_seq) < 0) {
+  if (phase_finalize(sockfd, &server_addr, filename, (uint8_t)last_seq) < 0) {
     result = 1;
     goto cleanup;
   }
@@ -561,3 +537,5 @@ cleanup:
   fclose(file);
   return result;
 }
+
+

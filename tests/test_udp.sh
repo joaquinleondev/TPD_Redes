@@ -20,14 +20,14 @@ dd if=/dev/zero of=test.bin bs=1024 count=20 2>/dev/null
 touch empty.bin
 
 # Verificar compilación
-if [ ! -f "client" ] || [ ! -f "server" ]; then
+if [ ! -f "bin/udp_client" ] || [ ! -f "bin/udp_server" ]; then
     echo -e "${RED}Error: compilar primero con 'make'${NC}"
     exit 1
 fi
 
 # Iniciar servidor en background
 echo -e "${YELLOW}Iniciando servidor...${NC}"
-./server credentials.txt > server.log 2>&1 &
+bin/udp_server credentials.txt > server.log 2>&1 &
 SERVER_PID=$!
 sleep 2
 
@@ -44,7 +44,7 @@ echo -e "${GREEN}Servidor iniciado (PID: $SERVER_PID)${NC}"
 # Prueba 1: Transferencia exitosa completa (4 fases, archivo no vacío)
 ########################################################################
 echo -e "\n${YELLOW}Prueba 1: Transferencia exitosa (archivo no vacío)${NC}"
-./client 127.0.0.1 test.bin test_credential > client_basic.log 2>&1
+bin/udp_client 127.0.0.1 test.bin test_credential > client_basic.log 2>&1
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Transferencia completada${NC}"
@@ -74,7 +74,7 @@ fi
 # Prueba 2: Credenciales inválidas (HELLO debe fallar)
 ########################################################################
 echo -e "\n${YELLOW}Prueba 2: Credenciales inválidas${NC}"
-./client 127.0.0.1 test.bin credencial_invalida > client_bad_cred.log 2>&1
+bin/udp_client 127.0.0.1 test.bin credencial_invalida > client_bad_cred.log 2>&1
 
 if [ $? -ne 0 ]; then
     echo -e "${GREEN}✓ Rechazo esperado de credenciales inválidas${NC}"
@@ -86,7 +86,7 @@ fi
 # Prueba 3: Filename inválido (muy corto)
 ########################################################################
 echo -e "\n${YELLOW}Prueba 3: Filename inválido (muy corto)${NC}"
-./client 127.0.0.1 abc test_credential > client_short_name.log 2>&1
+bin/udp_client 127.0.0.1 abc test_credential > client_short_name.log 2>&1
 
 if [ $? -ne 0 ]; then
     echo -e "${GREEN}✓ Rechazo esperado de filename corto${NC}"
@@ -98,7 +98,7 @@ fi
 # Prueba 4: Transferencia de archivo vacío
 ########################################################################
 echo -e "\n${YELLOW}Prueba 4: Transferencia de archivo vacío${NC}"
-./client 127.0.0.1 empty.bin test_credential > client_empty.log 2>&1
+bin/udp_client 127.0.0.1 empty.bin test_credential > client_empty.log 2>&1
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Transferencia de archivo vacío completada${NC}"
@@ -126,11 +126,11 @@ cp test.bin c1.bin
 cp test.bin c2.bin
 cp test.bin c3.bin
 
-./client 127.0.0.1 c1.bin test_credential > client_c1.log 2>&1 &
+bin/udp_client 127.0.0.1 c1.bin test_credential > client_c1.log 2>&1 &
 PID_C1=$!
-./client 127.0.0.1 c2.bin test_credential > client_c2.log 2>&1 &
+bin/udp_client 127.0.0.1 c2.bin test_credential > client_c2.log 2>&1 &
 PID_C2=$!
-./client 127.0.0.1 c3.bin test_credential > client_c3.log 2>&1 &
+bin/udp_client 127.0.0.1 c3.bin test_credential > client_c3.log 2>&1 &
 PID_C3=$!
 
 wait "$PID_C1"

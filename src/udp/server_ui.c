@@ -1,7 +1,8 @@
 /*
  * Servidor UDP Stop & Wait File Transfer Protocol - Versión con UI
- * Compilar: gcc -Wall -Wextra -o server_ui server_ui.c -lncurses
- * Uso: ./server_ui <credentials_file>
+ * Uso recomendado: compilar con el Makefile del proyecto.
+ *    make server_ui
+ *    ./server_ui <credentials_file>
  */
 
 #include <arpa/inet.h>
@@ -18,20 +19,12 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SERVER_PORT 20252
-#define MAX_DATA_SIZE 1478
-#define MAX_PDU_SIZE (2 + MAX_DATA_SIZE)
+#include "protocol.h"
+
 #define MAX_CLIENTS 10
 #define CLIENT_TIMEOUT 60
 #define MAX_CREDENTIALS 100
 #define MAX_LOG_ENTRIES 50
-
-// PDU Types
-#define TYPE_HELLO 1
-#define TYPE_WRQ 2
-#define TYPE_DATA 3
-#define TYPE_ACK 4
-#define TYPE_FIN 5
 
 // Color pairs
 #define COLOR_HEADER 1
@@ -40,15 +33,6 @@
 #define COLOR_WARNING 4
 #define COLOR_INFO 5
 #define COLOR_DATA 6
-
-// Estados del cliente
-typedef enum {
-  STATE_IDLE,
-  STATE_AUTHENTICATED,
-  STATE_READY_TO_TRANSFER,
-  STATE_TRANSFERRING,
-  STATE_COMPLETED
-} ClientState;
 
 // Estructura para mantener estado de cada cliente
 typedef struct {
@@ -73,14 +57,14 @@ typedef struct {
 } LogEntry;
 
 // Lista de credenciales válidas
-char valid_credentials[MAX_CREDENTIALS][256];
-int num_credentials = 0;
+static char valid_credentials[MAX_CREDENTIALS][256];
+static int num_credentials = 0;
 
 // Pool de sesiones de clientes
-ClientSession clients[MAX_CLIENTS];
+static ClientSession clients[MAX_CLIENTS];
 
 // Estadísticas globales
-struct {
+static struct {
   size_t total_bytes_received;
   int total_transfers_completed;
   int total_auth_attempts;
@@ -89,21 +73,21 @@ struct {
 } stats = {0};
 
 // Buffer de logs circular
-LogEntry log_buffer[MAX_LOG_ENTRIES];
-int log_head = 0;
-int log_count = 0;
+static LogEntry log_buffer[MAX_LOG_ENTRIES];
+static int log_head = 0;
+static int log_count = 0;
 
 // Windows de ncurses
-WINDOW *win_header = NULL;
-WINDOW *win_stats = NULL;
-WINDOW *win_clients = NULL;
-WINDOW *win_logs = NULL;
+static WINDOW *win_header = NULL;
+static WINDOW *win_stats = NULL;
+static WINDOW *win_clients = NULL;
+static WINDOW *win_logs = NULL;
 
 // Flag para actualización de UI
-volatile int ui_needs_update = 1;
+static volatile int ui_needs_update = 1;
 
 // Agregar entrada al log
-void add_log(const char *message, int color_pair) {
+static void add_log(const char *message, int color_pair) {
   log_buffer[log_head].timestamp = time(NULL);
   strncpy(log_buffer[log_head].message, message, 255);
   log_buffer[log_head].message[255] = '\0';
@@ -118,7 +102,7 @@ void add_log(const char *message, int color_pair) {
 }
 
 // Obtener nombre del estado
-const char *get_state_name(ClientState state) {
+static const char *get_state_name(ClientState state) {
   switch (state) {
   case STATE_IDLE:
     return "IDLE";
@@ -136,7 +120,7 @@ const char *get_state_name(ClientState state) {
 }
 
 // Obtener color del estado
-int get_state_color(ClientState state) {
+static int get_state_color(ClientState state) {
   switch (state) {
   case STATE_IDLE:
     return COLOR_INFO;
@@ -154,7 +138,7 @@ int get_state_color(ClientState state) {
 }
 
 // Formatear tiempo transcurrido
-void format_elapsed_time(time_t seconds, char *buf, size_t bufsize) {
+static void format_elapsed_time(time_t seconds, char *buf, size_t bufsize) {
   if (seconds < 60) {
     snprintf(buf, bufsize, "%lds", seconds);
   } else if (seconds < 3600) {
@@ -165,7 +149,7 @@ void format_elapsed_time(time_t seconds, char *buf, size_t bufsize) {
 }
 
 // Formatear tamaño en bytes
-void format_bytes(size_t bytes, char *buf, size_t bufsize) {
+static void format_bytes(size_t bytes, char *buf, size_t bufsize) {
   if (bytes < 1024) {
     snprintf(buf, bufsize, "%zuB", bytes);
   } else if (bytes < 1024 * 1024) {
@@ -176,7 +160,7 @@ void format_bytes(size_t bytes, char *buf, size_t bufsize) {
 }
 
 // Inicializar ncurses
-void init_ui() {
+static void init_ui(void) {
   initscr();
   cbreak();
   noecho();
@@ -208,7 +192,7 @@ void init_ui() {
 }
 
 // Actualizar UI
-void update_ui() {
+static void update_ui(void) {
   if (!ui_needs_update)
     return;
 
@@ -371,7 +355,7 @@ void update_ui() {
 }
 
 // Limpiar UI
-void cleanup_ui() {
+static void cleanup_ui(void) {
   if (win_header)
     delwin(win_header);
   if (win_stats)
@@ -384,7 +368,7 @@ void cleanup_ui() {
 }
 
 // Cargar credenciales desde archivo
-int load_credentials(const char *filename) {
+static int load_credentials(const char *filename) {
   FILE *f = fopen(filename, "r");
   if (!f) {
     perror("fopen credentials");
@@ -410,7 +394,7 @@ int load_credentials(const char *filename) {
 }
 
 // Verificar si una credencial es válida
-int is_valid_credential(const char *cred) {
+static int is_valid_credential(const char *cred) {
   for (int i = 0; i < num_credentials; i++) {
     if (strcmp(valid_credentials[i], cred) == 0) {
       return 1;
@@ -420,13 +404,13 @@ int is_valid_credential(const char *cred) {
 }
 
 // Comparar direcciones de socket
-int addr_equal(struct sockaddr_in *a, struct sockaddr_in *b) {
+static int addr_equal(struct sockaddr_in *a, struct sockaddr_in *b) {
   return (a->sin_addr.s_addr == b->sin_addr.s_addr &&
           a->sin_port == b->sin_port);
 }
 
 // Encontrar o crear sesión de cliente
-ClientSession *find_or_create_session(struct sockaddr_in *addr) {
+static ClientSession *find_or_create_session(struct sockaddr_in *addr) {
   time_t now = time(NULL);
   ClientSession *free_slot = NULL;
 
@@ -464,7 +448,7 @@ ClientSession *find_or_create_session(struct sockaddr_in *addr) {
 }
 
 // Liberar recursos de una sesión
-void cleanup_session(ClientSession *session) {
+static void cleanup_session(ClientSession *session) {
   if (session->file) {
     fclose(session->file);
     session->file = NULL;
@@ -491,7 +475,7 @@ void cleanup_session(ClientSession *session) {
 }
 
 // Limpiar sesiones inactivas
-void cleanup_inactive_sessions() {
+static void cleanup_inactive_sessions(void) {
   time_t now = time(NULL);
 
   for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -504,8 +488,8 @@ void cleanup_inactive_sessions() {
 }
 
 // Enviar ACK
-void send_ack(int sockfd, struct sockaddr_in *addr, uint8_t seq_num,
-              const char *error_msg) {
+static void send_ack(int sockfd, struct sockaddr_in *addr, uint8_t seq_num,
+                     const char *error_msg) {
   uint8_t buffer[MAX_PDU_SIZE];
   size_t pdu_size = 2;
 
@@ -525,8 +509,8 @@ void send_ack(int sockfd, struct sockaddr_in *addr, uint8_t seq_num,
 }
 
 // Manejar PDU HELLO
-void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                  size_t data_len, uint8_t seq_num) {
+static void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                         size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session) {
     add_log("Sin espacio para nuevos clientes", COLOR_ERROR);
@@ -577,8 +561,8 @@ void handle_hello(int sockfd, struct sockaddr_in *addr, uint8_t *data,
 }
 
 // Manejar PDU WRQ
-void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                size_t data_len, uint8_t seq_num) {
+static void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                       size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session)
     return;
@@ -595,7 +579,7 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       fn_len = i;
       break;
     }
-    filename[i] = data[i];
+    filename[i] = (char)data[i];
   }
   filename[fn_len] = '\0';
 
@@ -653,8 +637,8 @@ void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
 }
 
 // Manejar PDU DATA
-void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                 size_t data_len, uint8_t seq_num) {
+static void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                        size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session)
     return;
@@ -691,8 +675,8 @@ void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
 }
 
 // Manejar PDU FIN
-void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                size_t data_len, uint8_t seq_num) {
+static void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
+                       size_t data_len, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session)
     return;
@@ -704,7 +688,7 @@ void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       fn_len = i;
       break;
     }
-    filename[i] = data[i];
+    filename[i] = (char)data[i];
   }
   filename[fn_len] = '\0';
 
@@ -842,7 +826,7 @@ int main(int argc, char *argv[]) {
     uint8_t type = buffer[0];
     uint8_t seq_num = buffer[1];
     uint8_t *data = (recv_len > 2) ? &buffer[2] : NULL;
-    size_t data_len = (recv_len > 2) ? (recv_len - 2) : 0;
+    size_t data_len = (recv_len > 2) ? (size_t)(recv_len - 2) : 0;
 
     // Procesar según tipo
     switch (type) {
@@ -866,7 +850,7 @@ int main(int argc, char *argv[]) {
   // Cleanup
   add_log("Cerrando servidor...", COLOR_WARNING);
   update_ui();
-  sleep(1); // Esperar medio segundo para mostrar el mensaje
+  sleep(1); // Esperar un momento para mostrar el mensaje
 
   for (int i = 0; i < MAX_CLIENTS; i++) {
     if (clients[i].active) {
@@ -880,3 +864,5 @@ int main(int argc, char *argv[]) {
   printf("\n¡Servidor cerrado!\n");
   return 0;
 }
+
+

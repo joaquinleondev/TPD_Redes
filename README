@@ -1,0 +1,90 @@
+# TPD Redes – UDP Stop&Wait + TCP One-Way Delay
+
+Este repositorio contiene la resolución de dos puntos del TPD de Redes:
+
+- **Parte UDP**: protocolo de transferencia de archivos con Stop&Wait sobre UDP.
+- **Parte TCP**: medición de _one-way delay_ sobre TCP.
+
+## Estructura del proyecto
+
+- **`src/`**: Código fuente.
+  - `udp/`: Implementación del cliente y servidor UDP (versiones básica y UI).
+  - `tcp/`: Implementación del cliente y servidor TCP.
+  - `common/`: Utilidades compartidas.
+- **`include/`**: Archivos de cabecera compartidos.
+- **`tests/`**: Scripts de prueba automatizados.
+- **`bin/`**: Ejecutables compilados (generados automáticamente).
+- **`obj/`**: Archivos objeto intermedios (generados automáticamente).
+- **`Makefile`**: Sistema de construcción unificado.
+
+## Compilación
+
+Desde la raíz del repositorio:
+
+- **Todo el proyecto**:
+  ```bash
+  make all
+  ```
+
+- **Solo UDP**:
+  ```bash
+  make udp
+  ```
+
+- **Solo TCP**:
+  ```bash
+  make tcp
+  ```
+
+- **Limpieza**:
+  ```bash
+  make clean
+  ```
+
+## Ejecución
+
+Los ejecutables se generan en la carpeta `bin/`.
+
+### Parte UDP
+
+- **Servidor sin UI**:
+  ```bash
+  ./bin/udp_server <credentials_file>
+  ```
+- **Cliente sin UI**:
+  ```bash
+  ./bin/udp_client <server_ip> <filename> <credencial>
+  ```
+- **Servidor con UI (ncurses)**:
+  ```bash
+  ./bin/udp_server_ui <credentials_file>
+  ```
+- **Cliente con UI**:
+  ```bash
+  ./bin/udp_client_ui <server_ip> <filename> <credencial>
+  ```
+
+### Parte TCP
+
+- **Servidor TCP**:
+  ```bash
+  ./bin/tcp_server [output.csv]
+  ```
+- **Cliente TCP**:
+  ```bash
+  ./bin/tcp_client <server_ip> -d <ms_entre_envios> -N <duracion_segundos>
+  ```
+
+## Pruebas
+
+El proyecto incluye scripts de prueba automatizados:
+
+- **Ejecutar todas las pruebas**:
+  ```bash
+  make test
+  ```
+  Esto ejecutará tanto las pruebas de UDP como las de TCP.
+
+- **Detalles de las pruebas**:
+  - `tests/test_udp.sh`: Verifica transferencia de archivos, manejo de errores (credenciales, filenames), y concurrencia.
+  - `tests/test_tcp.sh`: Verifica la generación de mediciones de delay y el formato del CSV.

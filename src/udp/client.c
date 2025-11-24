@@ -1,7 +1,10 @@
 /*
  * Cliente UDP Stop & Wait File Transfer Protocol
- * Compilar: gcc -Wall -Wextra -o client udp_client.c
- * Uso: ./client <server_ip> <filename> <credentials>
+ * Uso recomendado: compilar con el Makefile del proyecto.
+ *    make client
+ *    ./client <server_ip> <filename> <credencial>
+ *
+ * El filename se usa tanto como nombre local como remoto.
  */
 
 #include <arpa/inet.h>
@@ -15,34 +18,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define SERVER_PORT 20252
-#define MAX_DATA_SIZE 1470
-#define MAX_PDU_SIZE (2 + MAX_DATA_SIZE)
-#define TIMEOUT_SEC 3
-#define MAX_RETRIES 5
-
-// PDU Types
-#define TYPE_HELLO 1
-#define TYPE_WRQ 2
-#define TYPE_DATA 3
-#define TYPE_ACK 4
-#define TYPE_FIN 5
-
-// Estados del cliente
-typedef enum {
-  STATE_DISCONNECTED,
-  STATE_HELLO_SENT,
-  STATE_WRQ_SENT,
-  STATE_TRANSFERRING,
-  STATE_FIN_SENT,
-  STATE_COMPLETED
-} ClientState;
-
-typedef struct {
-  uint8_t type;
-  uint8_t seq_num;
-  uint8_t data[MAX_DATA_SIZE];
-} PDU;
+#include "protocol.h"
 
 static int addr_equal(const struct sockaddr_in *a,
                       const struct sockaddr_in *b) {
@@ -51,7 +27,7 @@ static int addr_equal(const struct sockaddr_in *a,
 }
 
 // Configurar timeout del socket
-int set_socket_timeout(int sockfd, int seconds) {
+static int set_socket_timeout(int sockfd, int seconds) {
   struct timeval tv;
   tv.tv_sec = seconds;
   tv.tv_usec = 0;
@@ -64,12 +40,13 @@ int set_socket_timeout(int sockfd, int seconds) {
 }
 
 // Enviar PDU con reintentos
-int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
-                        uint8_t type, uint8_t seq_num, const uint8_t *data,
-                        size_t data_len, uint8_t expected_ack_seq) {
+static int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
+                               uint8_t type, uint8_t seq_num,
+                               const uint8_t *data, size_t data_len,
+                               uint8_t expected_ack_seq) {
   uint8_t buffer[MAX_PDU_SIZE];
   uint8_t recv_buffer[MAX_PDU_SIZE];
-  ssize_t pdu_size = 2 + data_len;
+  ssize_t pdu_size = 2 + (ssize_t)data_len;
   int retries = 0;
 
   // Construir PDU
@@ -84,7 +61,7 @@ int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
     printf("Enviando PDU: Type=%d, Seq=%d, Size=%zd (intento %d/%d)\n", type,
            seq_num, pdu_size, retries + 1, MAX_RETRIES);
 
-    ssize_t sent = sendto(sockfd, buffer, pdu_size, 0,
+    ssize_t sent = sendto(sockfd, buffer, (size_t)pdu_size, 0,
                           (struct sockaddr *)server_addr, sizeof(*server_addr));
 
     if (sent < 0) {
@@ -159,8 +136,8 @@ int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 1: Autenticación
-int phase_hello(int sockfd, struct sockaddr_in *server_addr,
-                const char *credentials) {
+static int phase_hello(int sockfd, struct sockaddr_in *server_addr,
+                       const char *credentials) {
   printf("\n=== FASE 1: AUTENTICACIÓN ===\n");
 
   size_t cred_len = strlen(credentials);
@@ -171,7 +148,7 @@ int phase_hello(int sockfd, struct sockaddr_in *server_addr,
     return -1;
   }
   if (send_pdu_with_retry(sockfd, server_addr, TYPE_HELLO, 0,
-                          (uint8_t *)credentials, cred_len, 0) < 0) {
+                          (const uint8_t *)credentials, cred_len, 0) < 0) {
     fprintf(stderr, "Error en fase de autenticación\n");
     return -1;
   }
@@ -181,8 +158,8 @@ int phase_hello(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 2: Write Request
-int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
-              const char *filename) {
+static int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
+                     const char *filename) {
   printf("\n=== FASE 2: WRITE REQUEST ===\n");
 
   size_t filename_len = strlen(filename);
@@ -208,8 +185,8 @@ int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 3: Transferencia de datos
-int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
-                        FILE *file) {
+static int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
+                               FILE *file) {
   printf("\n=== FASE 3: TRANSFERENCIA DE DATOS ===\n");
 
   uint8_t buffer[MAX_DATA_SIZE];
@@ -266,8 +243,8 @@ int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
 }
 
 // Fase 4: Finalización
-int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
-                   const char *filename, uint8_t last_seq) {
+static int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
+                          const char *filename, uint8_t last_seq) {
   printf("\n=== FASE 4: FINALIZACIÓN ===\n");
 
   uint8_t next_seq = 1 - last_seq; // Incrementar seq_num
@@ -291,21 +268,18 @@ int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 5) {
-    fprintf(
-        stderr,
-        "Uso: %s <server_ip> <credencial> <filename_local> <filename_remoto>\n",
-        argv[0]);
+  if (argc != 4) {
+    fprintf(stderr, "Uso: %s <server_ip> <filename> <credencial>\n", argv[0]);
     fprintf(stderr,
-            "Ejemplo: %s 192.168.1.100 mi_credencial local.txt remoto.txt\n",
+            "Ejemplo: %s 127.0.0.1 test.bin test_credential\n",
             argv[0]);
     return 1;
   }
 
   const char *server_ip = argv[1];
-  const char *credentials = argv[2];
-  const char *filename_local = argv[3];
-  const char *filename_remoto = argv[4];
+  const char *filename_local = argv[2];
+  const char *credentials = argv[3];
+  const char *filename_remoto = filename_local;
 
   // Abrir archivo
   FILE *file = fopen(filename_local, "rb");
@@ -367,7 +341,8 @@ int main(int argc, char *argv[]) {
   }
 
   // Fase 4: FIN
-  if (phase_finalize(sockfd, &server_addr, filename_remoto, last_seq) < 0) {
+  if (phase_finalize(sockfd, &server_addr, filename_remoto, (uint8_t)last_seq) <
+      0) {
     result = 1;
     goto cleanup;
   }
@@ -379,3 +354,5 @@ cleanup:
   fclose(file);
   return result;
 }
+
+

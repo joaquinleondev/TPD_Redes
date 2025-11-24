@@ -15,7 +15,7 @@ rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
 
 # Verificar compilación
-if [ ! -x "tcp_client" ] || [ ! -x "tcp_server" ]; then
+if [ ! -x "bin/tcp_client" ] || [ ! -x "bin/tcp_server" ]; then
     echo -e "${RED}Error: compilar primero con 'make tcp_client tcp_server' o 'make all'${NC}"
     exit 1
 fi
@@ -25,7 +25,7 @@ start_server() {
     local log_file="$2"
 
     echo -e "${YELLOW}Iniciando tcp_server -> CSV: ${csv_file}${NC}"
-    ./tcp_server "${csv_file}" > "${log_file}" 2>&1 &
+    bin/tcp_server "${csv_file}" > "${log_file}" 2>&1 &
     SERVER_PID=$!
     sleep 1
 
@@ -55,7 +55,7 @@ LOG1="${OUTDIR}/tcp_server_p1.log"
 start_server "$CSV1" "$LOG1"
 
 echo -e "${YELLOW}Ejecutando tcp_client...${NC}"
-./tcp_client 127.0.0.1 -d 50 -N 3
+bin/tcp_client 127.0.0.1 -d 50 -N 3
 RET_CLIENT=$?
 
 wait_server
@@ -92,7 +92,7 @@ LOG_FAST="${OUTDIR}/tcp_server_fast.log"
 
 # Caso "lento"
 start_server "$CSV_SLOW" "$LOG_SLOW"
-./tcp_client 127.0.0.1 -d 50 -N 2
+bin/tcp_client 127.0.0.1 -d 50 -N 2
 RET_SLOW=$?
 wait_server
 
@@ -103,7 +103,7 @@ fi
 
 # Caso "rápido"
 start_server "$CSV_FAST" "$LOG_FAST"
-./tcp_client 127.0.0.1 -d 10 -N 2
+bin/tcp_client 127.0.0.1 -d 10 -N 2
 RET_FAST=$?
 wait_server
 
