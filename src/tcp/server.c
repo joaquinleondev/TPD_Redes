@@ -34,7 +34,6 @@
 
 // Obtener tiempo actual en microsegundos desde epoch
 
-
 int main(int argc, char *argv[]) {
   const char *csv_filename = "one_way_delay.csv";
   if (argc >= 2) {
@@ -61,8 +60,8 @@ int main(int argc, char *argv[]) {
   }
 
   int optval = 1;
-  if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &optval,
-                 sizeof(optval)) < 0) {
+  if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) <
+      0) {
     perror("setsockopt SO_REUSEADDR");
     close(listen_fd);
     fclose(csv);
@@ -96,8 +95,7 @@ int main(int argc, char *argv[]) {
   // Aceptar un único cliente (no se exige concurrencia)
   struct sockaddr_in client_addr;
   socklen_t client_len = sizeof(client_addr);
-  int conn_fd =
-      accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+  int conn_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
   if (conn_fd < 0) {
     perror("accept");
     close(listen_fd);
@@ -164,7 +162,7 @@ int main(int argc, char *argv[]) {
 
       // Ahora sí: tenemos una PDU completa en recv_buf[0..pdu_len-1].
       // Recién AHORA tomamos el Destination Timestamp (consigna).
-      uint64_t dest_ts = get_time_us();
+      uint64_t dest_ts = current_time_ms();
 
       // Extraer Origin Timestamp de los primeros 8 bytes
       uint64_t origin_ts = 0;
@@ -209,5 +207,3 @@ int main(int argc, char *argv[]) {
   printf("Servidor TCP finalizado.\n");
   return EXIT_SUCCESS;
 }
-
-

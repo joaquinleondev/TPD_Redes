@@ -8,17 +8,26 @@
  */
 
 #include <arpa/inet.h>
+#include <asm-generic/errno-base.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "protocol.h"
+
+long long current_time_ms() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (ts.tv_sec * 1000LL) + (ts.tv_nsec / 1000000LL);
+}
 
 static int addr_equal(const struct sockaddr_in *a,
                       const struct sockaddr_in *b) {
@@ -26,20 +35,6 @@ static int addr_equal(const struct sockaddr_in *a,
          a->sin_addr.s_addr == b->sin_addr.s_addr;
 }
 
-// Configurar timeout del socket
-static int set_socket_timeout(int sockfd, int seconds) {
-  struct timeval tv;
-  tv.tv_sec = seconds;
-  tv.tv_usec = 0;
-
-  if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-    perror("setsockopt SO_RCVTIMEO");
-    return -1;
-  }
-  return 0;
-}
-
-// Enviar PDU con reintentos
 static int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
                                uint8_t type, uint8_t seq_num,
                                const uint8_t *data, size_t data_len,
@@ -57,78 +52,88 @@ static int send_pdu_with_retry(int sockfd, struct sockaddr_in *server_addr,
   }
 
   while (retries < MAX_RETRIES) {
-    // Enviar PDU
-    printf("Enviando PDU: Type=%d, Seq=%d, Size=%zd (intento %d/%d)\n", type,
-           seq_num, pdu_size, retries + 1, MAX_RETRIES);
 
-    ssize_t sent = sendto(sockfd, buffer, (size_t)pdu_size, 0,
-                          (struct sockaddr *)server_addr, sizeof(*server_addr));
+    // 1. ENVIAR PDU
+    sendto(sockfd, buffer, pdu_size, 0, (struct sockaddr *)server_addr,
+           sizeof(*server_addr));
 
-    if (sent < 0) {
-      perror("sendto");
-      return -1;
-    }
+    // 2. CALCULAR EL TIEMPO LÍMITE (DEADLINE)
+    long long start_time = current_time_ms();
+    long long deadline = start_time + TIMEOUT_MS;
 
-    // Esperar ACK
-    struct sockaddr_in from_addr;
-    socklen_t from_len = sizeof(from_addr);
+    while (1) {
+      long long now = current_time_ms();
+      int time_left = (int)(deadline - now);
 
-    ssize_t recv_len = recvfrom(sockfd, recv_buffer, MAX_PDU_SIZE, 0,
-                                (struct sockaddr *)&from_addr, &from_len);
+      // A. Verificamos si se acabó el tiempo REAL
+      if (time_left <= 0) {
+        printf("Timeout real alcanzado (retransmitiendo...)\n");
+        break;
+      }
 
-    if (recv_len < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        printf("Timeout esperando ACK, reintentando...\n");
-        retries++;
+      // B. Preparamos la estructura poll
+      struct pollfd pfd;
+      pfd.fd = sockfd;     // El socket que miramos
+      pfd.events = POLLIN; // Nos interesa si hay datos para LEER
+
+      // C. Esperamos solo el tiempo que nos queda (time_left)
+      int rc = poll(&pfd, 1, time_left);
+
+      if (rc < 0) {
+        if (errno == EINTR)
+          continue; // Nos interrumpieron, seguimos intentando
+        perror("poll error");
+        return -1;
+      }
+
+      if (rc == 0) {
+        // Poll retornó 0, significa Timeout del poll.
+        // El bucle volverá arriba, calculará time_left <= 0 y saldrá.
         continue;
       }
-      if (errno == EINTR) {
-        printf("recvfrom interrumpido por señal, reintentando...\n");
-        continue;
+
+      // D. Si rc > 0, ¡HAY DATOS!
+      if (pfd.revents & POLLIN) {
+
+        struct sockaddr_in from_addr;
+        socklen_t from_len = sizeof(from_addr);
+
+        // Como poll avisó, recvfrom es instantáneo
+        ssize_t recv_len = recvfrom(sockfd, recv_buffer, MAX_PDU_SIZE, 0,
+                                    (struct sockaddr *)&from_addr, &from_len);
+
+        // --- VALIDACIONES (Stop & Wait estricto) ---
+
+        // 1. Validar origen (Ignorar paquetes de intrusos)
+        if (!addr_equal(&from_addr, server_addr)) {
+          printf("Ignorando paquete de IP desconocida\n");
+          continue;
+        }
+
+        // 2. Validar tamaño mínimo
+        if (recv_len < 2)
+          continue; // Muy corto, basura
+
+        // 3. Validar ACK correcto
+        if (recv_buffer[0] == TYPE_ACK && recv_buffer[1] == expected_ack_seq) {
+          if (recv_len > 2) {
+            // El servidor mandó ACK pero con payload -> Es un ERROR lógico
+            // (ej. credenciales mal)
+            printf("Error reportado por servidor: %.*s\n", (int)(recv_len - 2),
+                   recv_buffer + 2);
+            return -1; // Retornamos error para abortar
+          }
+          return 0; // Éxito limpio
+        }
+
+        // Si llegamos acá, es un ACK duplicado o incorrecto.
+        // Lo ignoramos y el bucle sigue consumiendo el tiempo restante.
+        printf("Ignorando ACK incorrecto (Seq recibida: %d)\n", recv_buffer[1]);
       }
-      perror("recvfrom");
-      return -1;
     }
 
-    if (!addr_equal(&from_addr, server_addr)) {
-      printf("PDU recibida de origen desconocido, ignorando\n");
-      continue;
-    }
-
-    // Validar ACK
-    if (recv_len < 2) {
-      printf("PDU inválida recibida (muy corta)\n");
-      retries++;
-      continue;
-    }
-
-    uint8_t recv_type = recv_buffer[0];
-    uint8_t recv_seq = recv_buffer[1];
-
-    if (recv_type != TYPE_ACK) {
-      printf("Tipo de PDU inesperado: %d (esperaba ACK)\n", recv_type);
-      retries++;
-      continue;
-    }
-
-    if (recv_seq != expected_ack_seq) {
-      printf("Número de secuencia incorrecto: %d (esperaba %d), ignorando\n",
-             recv_seq, expected_ack_seq);
-      continue;
-    }
-
-    // ACK válido recibido
-    printf("ACK recibido correctamente: Seq=%d\n", recv_seq);
-
-    // Verificar si hay mensaje de error
-    if (recv_len > 2) {
-      printf("Mensaje del servidor: %.*s\n", (int)(recv_len - 2),
-             recv_buffer + 2);
-      // Si hay payload, podría ser un error
-      return -1; // Error en autenticación o WRQ
-    }
-
-    return 0; // Éxito
+    // Si salimos del while(1) fue por timeout
+    retries++;
   }
 
   printf("Máximo de reintentos alcanzado\n");
@@ -164,14 +169,14 @@ static int phase_wrq(int sockfd, struct sockaddr_in *server_addr,
 
   size_t filename_len = strlen(filename);
 
-  // Validar longitud del filename (4-100 caracteres)
-  if (filename_len < 4 || filename_len > 100) {
-    fprintf(stderr, "Filename debe tener entre 4 y 100 caracteres\n");
+  // Validar longitud del filename (4-10 caracteres)
+  if (filename_len < 4 || filename_len > 10) {
+    fprintf(stderr, "Filename debe tener entre 4 y 10 caracteres\n");
     return -1;
   }
 
   // Enviar filename con null terminator
-  uint8_t buffer[102]; // 100 chars + null + margen
+  uint8_t buffer[12]; // 10 chars + null + margen
   strcpy((char *)buffer, filename);
 
   if (send_pdu_with_retry(sockfd, server_addr, TYPE_WRQ, 1, buffer,
@@ -193,14 +198,14 @@ static int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
   uint8_t seq_num = 0;
   size_t total_sent = 0;
   uint8_t last_seq_sent = 0;
-  int any_data_sent = 0;
 
   while (1) {
     size_t bytes_read = fread(buffer, 1, MAX_DATA_SIZE, file);
 
     if (bytes_read == 0) {
       if (feof(file)) {
-        if (!any_data_sent) {
+        if (total_sent == 0) {
+          // Archivo vacío: enviar un DATA vacío
           printf("Archivo vacío, enviando DATA vacío con Seq=%d\n", seq_num);
           if (send_pdu_with_retry(sockfd, server_addr, TYPE_DATA, seq_num, NULL,
                                   0, seq_num) < 0) {
@@ -208,8 +213,6 @@ static int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
             return -1;
           }
           last_seq_sent = seq_num;
-          any_data_sent = 1;
-          seq_num = 1 - seq_num;
         }
         printf("Archivo completamente leído\n");
         break;
@@ -231,23 +234,19 @@ static int phase_data_transfer(int sockfd, struct sockaddr_in *server_addr,
 
     total_sent += bytes_read;
     last_seq_sent = seq_num;
-    any_data_sent = 1;
     seq_num = 1 - seq_num; // Alternar 0 <-> 1
   }
 
   printf("Total enviado: %zu bytes\n", total_sent);
-  if (!any_data_sent) {
-    return -1;
-  }
-  return last_seq_sent; // Retornar último seq_num usado
+  return last_seq_sent;
 }
 
 // Fase 4: Finalización
 static int phase_finalize(int sockfd, struct sockaddr_in *server_addr,
-                          const char *filename, uint8_t last_seq) {
+                          uint8_t last_seq) {
   printf("\n=== FASE 4: FINALIZACIÓN ===\n");
 
-  uint8_t next_seq = 1 - last_seq; // Incrementar seq_num
+  uint8_t next_seq = 1 - last_seq;
 
   if (send_pdu_with_retry(sockfd, server_addr, TYPE_FIN, next_seq, NULL, 0,
                           next_seq) < 0) {
@@ -272,25 +271,10 @@ int main(int argc, char *argv[]) {
   const char *credentials = argv[3];
   const char *filename_remoto = filename_local;
 
-  // Abrir archivo
-  FILE *file = fopen(filename_local, "rb");
-  if (!file) {
-    perror("fopen");
-    return 1;
-  }
-
   // Crear socket UDP
   int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
   if (sockfd < 0) {
     perror("socket");
-    fclose(file);
-    return 1;
-  }
-
-  // Configurar timeout
-  if (set_socket_timeout(sockfd, TIMEOUT_SEC) < 0) {
-    close(sockfd);
-    fclose(file);
     return 1;
   }
 
@@ -303,7 +287,6 @@ int main(int argc, char *argv[]) {
   if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
     perror("inet_pton");
     close(sockfd);
-    fclose(file);
     return 1;
   }
 
@@ -311,6 +294,7 @@ int main(int argc, char *argv[]) {
 
   // Ejecutar protocolo
   int result = 0;
+  FILE *file = NULL;
 
   // Fase 1: HELLO
   if (phase_hello(sockfd, &server_addr, credentials) < 0) {
@@ -324,6 +308,14 @@ int main(int argc, char *argv[]) {
     goto cleanup;
   }
 
+  // Abrir archivo
+  file = fopen(filename_local, "rb");
+  if (!file) {
+    perror("fopen");
+    result = 1;
+    goto cleanup;
+  }
+
   // Fase 3: DATA
   int last_seq = phase_data_transfer(sockfd, &server_addr, file);
   if (last_seq < 0) {
@@ -332,8 +324,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Fase 4: FIN
-  if (phase_finalize(sockfd, &server_addr, filename_remoto, (uint8_t)last_seq) <
-      0) {
+  if (phase_finalize(sockfd, &server_addr, (uint8_t)last_seq) < 0) {
     result = 1;
     goto cleanup;
   }
@@ -342,6 +333,7 @@ int main(int argc, char *argv[]) {
 
 cleanup:
   close(sockfd);
-  fclose(file);
+  if (file)
+    fclose(file);
   return result;
 }

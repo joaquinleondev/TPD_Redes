@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,10 +14,6 @@
 #include <unistd.h>
 
 #include "protocol.h"
-
-#define MAX_CLIENTS 10    // Definir según necesidad
-#define CLIENT_TIMEOUT 60 // Timeout de inactividad en segundos
-#define MAX_CREDENTIALS 100
 
 // Estructura para mantener estado de cada cliente
 typedef struct {
@@ -38,9 +35,6 @@ static int num_credentials = 0;
 
 // Pool de sesiones de clientes
 static ClientSession clients[MAX_CLIENTS];
-
-// Log de servidor para pruebas (se escribe también por stdout redirigido)
-static FILE *server_log = NULL;
 
 // Cargar credenciales desde archivo
 static int load_credentials(const char *filename) {
@@ -240,32 +234,19 @@ static void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     return;
   }
 
-  // Extraer filename (máx 10 caracteres + terminador)
-  char filename[10];
+  // Extraer filename (máx 10 caracteres + null terminator)
+  char filename[12]; // 10 chars + null + margen
   size_t fn_len = 0;
-  size_t i;
 
-  for (i = 0; i < data_len && i < sizeof(filename); i++) {
+  // Buscar el null terminator y copiar
+  for (size_t i = 0; i < data_len && i < sizeof(filename) - 1; i++) {
     if (data[i] == '\0') {
-      break; // terminador recibido
+      break;
     }
     filename[i] = (char)data[i];
+    fn_len = i + 1;
   }
-  fn_len = i; // si no hubo '\0'
-
-  // Si filename[fn_len] no es '\0', el filename es demasiado largo por lo tanto
-  // debo mandar el ack con error
-  if (fn_len == sizeof(filename) && data[fn_len - 1] != '\0') {
-    send_ack(sockfd, addr, 1, "Filename length must be 4-10 chars");
-    return;
-  }
-
-  // Asegurar terminación en '\0' para usarlo como string C segura
-  if (fn_len < sizeof(filename)) {
-    filename[fn_len] = '\0';
-  } else {
-    filename[sizeof(filename) - 1] = '\0';
-  }
+  filename[fn_len] = '\0';
 
   printf("Solicitud de escritura: '%s'\n", filename);
 
@@ -320,10 +301,6 @@ static void handle_wrq(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     }
   } else {
     printf("WRQ en estado incorrecto, descartando\n");
-    if (server_log) {
-      fprintf(server_log, "WRQ en estado incorrecto\n");
-      fflush(server_log);
-    }
   }
 }
 
@@ -339,10 +316,6 @@ static void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
   if (session->state != STATE_READY_TO_TRANSFER &&
       session->state != STATE_TRANSFERRING) {
     printf("DATA sin WRQ previo, descartando\n");
-    if (server_log) {
-      fprintf(server_log, "DATA sin WRQ previo\n");
-      fflush(server_log);
-    }
     return;
   }
 
@@ -359,9 +332,6 @@ static void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
       session->bytes_received += written;
     }
 
-    // printf("DATA recibido: %zu bytes (total: %zu), Seq=%d\n", data_len,
-    //        session->bytes_received, seq_num);
-
     // Enviar ACK para nuevo DATA
     send_ack(sockfd, addr, seq_num, NULL);
 
@@ -371,59 +341,35 @@ static void handle_data(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     session->last_ack_seq = seq_num;
     session->has_last_ack = 1;
   } else {
-    // Seq realmente inesperado
-    printf("Seq num incorrecto: recibido=%d, esperado=%d\n", seq_num,
+    // Seq incorrecto: puede ser duplicado o error
+    printf("Seq incorrecto: recibido=%d, esperado=%d\n", seq_num,
            session->expected_seq);
-    if (server_log) {
-      fprintf(server_log, "Seq num incorrecto: recibido=%d, esperado=%d\n",
-              seq_num, session->expected_seq);
-      fflush(server_log);
-    }
 
-    // Si coincide con el último ACK, lo tratamos como duplicado (retransmisión)
+    // Si coincide con el último ACK, es un duplicado (retransmisión del
+    // cliente)
     if (session->has_last_ack && seq_num == session->last_ack_seq) {
-      printf("DATA duplicado (Seq=%d), reenviando ACK previo\n", seq_num);
+      printf("DATA duplicado (Seq=%d), reenviando ACK\n", seq_num);
       send_ack(sockfd, addr, session->last_ack_seq, NULL);
     }
-    // En cualquier otro caso, simplemente se descarta el PDU
   }
 }
 
-// Manejar PDU FIN
-static void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
-                       size_t data_len, uint8_t seq_num) {
+// Manejar PDU FIN (sin payload, solo type + seq_num)
+static void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t seq_num) {
   ClientSession *session = find_or_create_session(addr);
   if (!session) {
     return;
   }
 
-  // Extraer filename
-  char filename[256];
-  size_t fn_len = 0;
-  for (size_t i = 0; i < data_len && i < 255; i++) {
-    if (data[i] == '\0') {
-      fn_len = i;
-      break;
-    }
-    filename[i] = (char)data[i];
-  }
-  filename[fn_len] = '\0';
-
   if (session->state == STATE_TRANSFERRING) {
     // Validar sequence number (debe ser el siguiente esperado)
     if (seq_num != session->expected_seq) {
-      printf("FIN con Seq num incorrecto, descartando\n");
+      printf("FIN con Seq incorrecto: recibido=%d, esperado=%d\n", seq_num,
+             session->expected_seq);
       return;
     }
 
-    // Validar filename coincide
-    if (strcmp(filename, session->filename) != 0) {
-      send_ack(sockfd, addr, seq_num, "Filename mismatch");
-      cleanup_session(session);
-      return;
-    }
-
-    printf("Finalización recibida: '%s', total: %zu bytes\n", filename,
+    printf("Finalización recibida: '%s', total: %zu bytes\n", session->filename,
            session->bytes_received);
 
     // Cerrar archivo y enviar ACK final
@@ -435,21 +381,15 @@ static void handle_fin(int sockfd, struct sockaddr_in *addr, uint8_t *data,
     session->state = STATE_COMPLETED;
     session->last_ack_seq = seq_num;
     session->has_last_ack = 1;
+
   } else if (session->state == STATE_COMPLETED) {
-    // Posible FIN duplicado: validar filename y seq
-    if (strcmp(filename, session->filename) == 0 && session->has_last_ack &&
-        seq_num == session->last_ack_seq) {
-      printf("FIN duplicado para '%s', reenviando ACK final\n", filename);
+    // FIN duplicado: reenviar ACK si el seq coincide
+    if (session->has_last_ack && seq_num == session->last_ack_seq) {
+      printf("FIN duplicado para '%s', reenviando ACK\n", session->filename);
       send_ack(sockfd, addr, seq_num, NULL);
-    } else {
-      printf("FIN recibido en estado COMPLETED con datos inconsistentes\n");
     }
   } else {
     printf("FIN en estado incorrecto (%d), descartando\n", session->state);
-    if (server_log) {
-      fprintf(server_log, "FIN en estado incorrecto\n");
-      fflush(server_log);
-    }
   }
 }
 
@@ -497,70 +437,79 @@ int main(int argc, char *argv[]) {
   printf("Servidor escuchando en puerto %d\n", SERVER_PORT);
   printf("Máximo de clientes concurrentes: %d\n", MAX_CLIENTS);
 
-  // Abrir log sencillo para compatibilidad con test.sh
-  server_log = fopen("server.log", "a");
-  if (!server_log) {
-    perror("fopen server.log");
-  }
-
   // Loop principal
   uint8_t buffer[MAX_PDU_SIZE];
 
   while (1) {
-    // Limpiar sesiones inactivas
     cleanup_inactive_sessions();
 
-    // Recibir PDU
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    ssize_t recv_len = recvfrom(sockfd, buffer, MAX_PDU_SIZE, 0,
-                                (struct sockaddr *)&client_addr, &client_len);
+    struct pollfd pfd;
+    pfd.fd = sockfd;
+    pfd.events = POLLIN;
 
-    if (recv_len < 0) {
+    // Esperar hasta 1000ms (1 segundo)
+    int ret = poll(&pfd, 1, 1000);
+
+    if (ret < 0) {
       if (errno == EINTR)
         continue;
-      perror("recvfrom");
+      perror("poll");
       break;
     }
 
-    if (recv_len < 2) {
-      printf("PDU demasiado corta, descartando\n");
+    if (ret == 0) {
+      // Timeout del poll: No llegó nada, volvemos arriba a limpiar sesiones
       continue;
     }
 
-    // Extraer campos
-    uint8_t type = buffer[0];
-    uint8_t seq_num = buffer[1];
-    uint8_t *data = (recv_len > 2) ? &buffer[2] : NULL;
-    size_t data_len = (recv_len > 2) ? (size_t)(recv_len - 2) : 0;
+    if (pfd.revents & POLLIN) {
+      // Ahora sí, recvfrom es seguro y no bloqueará
+      ssize_t recv_len = recvfrom(sockfd, buffer, MAX_PDU_SIZE, 0,
+                                  (struct sockaddr *)&client_addr, &client_len);
 
-    char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
-    // printf("\n[%s:%d] PDU recibida: Type=%d, Seq=%d, DataLen=%zu\n", ip,
-    //        ntohs(client_addr.sin_port), type, seq_num, data_len);
+      if (recv_len < 0) {
+        if (errno == EINTR)
+          continue;
+        perror("recvfrom");
+        break;
+      }
 
-    // Procesar según tipo
-    switch (type) {
-    case TYPE_HELLO:
-      handle_hello(sockfd, &client_addr, data, data_len, seq_num);
-      break;
-    case TYPE_WRQ:
-      handle_wrq(sockfd, &client_addr, data, data_len, seq_num);
-      break;
-    case TYPE_DATA:
-      handle_data(sockfd, &client_addr, data, data_len, seq_num);
-      break;
-    case TYPE_FIN:
-      handle_fin(sockfd, &client_addr, data, data_len, seq_num);
-      break;
-    default:
-      printf("Tipo de PDU desconocido: %d\n", type);
-      break;
+      if (recv_len < 2) {
+        printf("PDU demasiado corta, descartando\n");
+        continue;
+      }
+
+      // Extraer campos
+      uint8_t type = buffer[0];
+      uint8_t seq_num = buffer[1];
+      uint8_t *data = (recv_len > 2) ? &buffer[2] : NULL;
+      size_t data_len = (recv_len > 2) ? (size_t)(recv_len - 2) : 0;
+
+      // Procesar según tipo
+      switch (type) {
+      case TYPE_HELLO:
+        handle_hello(sockfd, &client_addr, data, data_len, seq_num);
+        break;
+      case TYPE_WRQ:
+        handle_wrq(sockfd, &client_addr, data, data_len, seq_num);
+        break;
+      case TYPE_DATA:
+        handle_data(sockfd, &client_addr, data, data_len, seq_num);
+        break;
+      case TYPE_FIN:
+        handle_fin(sockfd, &client_addr, seq_num);
+        break;
+      default:
+        printf("Tipo de PDU desconocido: %d\n", type);
+        break;
+      }
     }
   }
 
-  // Cleanup
+  // Cleanup (solo se ejecuta si salimos del loop por error)
   for (int i = 0; i < MAX_CLIENTS; i++) {
     if (clients[i].active) {
       cleanup_session(&clients[i]);
@@ -568,10 +517,5 @@ int main(int argc, char *argv[]) {
   }
 
   close(sockfd);
-  if (server_log) {
-    fclose(server_log);
-  }
   return 0;
 }
-
-
