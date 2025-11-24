@@ -30,3 +30,4 @@ $(BIN_DIR)/tcp_server: src/tcp/server.c src/tcp/common.c src/tcp/common.h | $(BI
 
 clean:
 	rm -rf $(BIN_DIR)
+	rm -rf uploads
