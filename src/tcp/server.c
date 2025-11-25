@@ -1,24 +1,13 @@
-/*
- * tcp_server.c
- *
- * Servidor TCP para medir one-way delay.
- * Escucha en el puerto 20252, acepta un cliente y loguea los delays en un CSV.
- *
- * Uso recomendado: compilar con el Makefile del proyecto:
- *    make tcp_server
- *    ./tcp_server [output.csv]
- *   Si no se especifica archivo, usa "one_way_delay.csv".
- */
-
 #include <arpa/inet.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <unistd.h>
 
 #include "common.h"
@@ -27,12 +16,31 @@
 
 #define MIN_PAYLOAD_SIZE 500
 #define MAX_PAYLOAD_SIZE 1000
+// Tamaño mínimo de PDU: 8 bytes timestamp + 500 payload + 1 delimitador
+#define MIN_PDU_SIZE (8 + MIN_PAYLOAD_SIZE + 1)
 #define MAX_PDU_SIZE (8 + MAX_PAYLOAD_SIZE + 1)
 
-// Buffer para lecturas parciales de TCP
-#define RECV_BUF_SIZE 8192
+// Buffer para lecturas parciales de TCP (debe poder contener varias PDUs)
+#define RECV_BUF_SIZE 16384
 
-// Obtener tiempo actual en microsegundos desde epoch
+// Flag para shutdown graceful
+static volatile sig_atomic_t g_running = 1;
+
+static void signal_handler(int sig) {
+  (void)sig;
+  g_running = 0;
+}
+
+static void setup_signal_handlers(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = signal_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGTERM, &sa, NULL);
+}
 
 int main(int argc, char *argv[]) {
   const char *csv_filename = "one_way_delay.csv";
@@ -40,15 +48,16 @@ int main(int argc, char *argv[]) {
     csv_filename = argv[1];
   }
 
+  setup_signal_handlers();
+
   FILE *csv = fopen(csv_filename, "w");
   if (!csv) {
     perror("fopen CSV");
     return EXIT_FAILURE;
   }
 
-  // Podés elegir si querés o no header. El enunciado no lo exige,
-  // pero ayuda para analizar después en Python/Excel.
-  fprintf(csv, "measurement,one_way_delay_seconds\n");
+  // Header CSV para análisis posterior (mediciones en microsegundos)
+  fprintf(csv, "measurement,one_way_delay_us\n");
   fflush(csv);
 
   // Crear socket TCP
@@ -59,6 +68,7 @@ int main(int argc, char *argv[]) {
     return EXIT_FAILURE;
   }
 
+  // Permitir reutilizar el puerto inmediatamente
   int optval = 1;
   if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) <
       0) {
@@ -68,7 +78,7 @@ int main(int argc, char *argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Bind al puerto 20252 en todas las interfaces
+  // Bind al puerto en todas las interfaces
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
@@ -91,16 +101,21 @@ int main(int argc, char *argv[]) {
 
   printf("Servidor TCP escuchando en puerto %d\n", SERVER_PORT);
   printf("Logueando one-way delay en: %s\n", csv_filename);
+  printf("Presione Ctrl+C para terminar.\n\n");
 
-  // Aceptar un único cliente (no se exige concurrencia)
+  // Aceptar un único cliente
   struct sockaddr_in client_addr;
   socklen_t client_len = sizeof(client_addr);
   int conn_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
   if (conn_fd < 0) {
-    perror("accept");
+    if (errno == EINTR && !g_running) {
+      printf("\nServidor interrumpido antes de recibir conexión.\n");
+    } else {
+      perror("accept");
+    }
     close(listen_fd);
     fclose(csv);
-    return EXIT_FAILURE;
+    return (errno == EINTR) ? EXIT_SUCCESS : EXIT_FAILURE;
   }
 
   char client_ip[INET_ADDRSTRLEN];
@@ -110,95 +125,115 @@ int main(int argc, char *argv[]) {
 
   uint8_t recv_buf[RECV_BUF_SIZE];
   size_t recv_len = 0;
-  int measurement_idx = 1;
+  int measurement_idx = 0;
+  int invalid_pdus = 0;
 
-  while (1) {
+  while (g_running) {
+    // Verificar si hay espacio en el buffer
+    if (recv_len >= sizeof(recv_buf)) {
+      // Buffer lleno sin delimitador encontrado: error de protocolo
+      fprintf(stderr, "ERROR: Buffer lleno sin encontrar delimitador. "
+                      "Posible corrupción de protocolo. Limpiando buffer.\n");
+      recv_len = 0;
+      invalid_pdus++;
+      continue;
+    }
+
     // Leer del socket TCP (pueden llegar PDUs parciales o múltiples juntas)
     ssize_t n =
         recv(conn_fd, recv_buf + recv_len, sizeof(recv_buf) - recv_len, 0);
     if (n < 0) {
       if (errno == EINTR) {
-        continue; // reintentar
+        continue; // Reintentar si fue interrumpido por señal
       }
       perror("recv");
       break;
     }
     if (n == 0) {
       printf("Cliente cerró la conexión.\n");
-      break; // fin normal
+      break;
     }
 
     recv_len += (size_t)n;
 
     // Procesar todas las PDUs completas que haya en el buffer
-    while (1) {
-      // Buscar el delimitador '|' dentro de recv_buf[0..recv_len-1]
-      size_t i;
+    while (recv_len > 0) {
+      // Buscar el delimitador '|' dentro del buffer, pero ignorar cualquier '|'
+      // que aparezca antes de MIN_PDU_SIZE (sería un byte '|' dentro del
+      // timestamp)
+      size_t delim_pos;
       int found = 0;
-      for (i = 0; i < recv_len; i++) {
-        if (recv_buf[i] == '|') {
+      // Empezar la búsqueda desde MIN_PDU_SIZE - 1 (posición mínima válida para
+      // '|')
+      size_t search_start = (MIN_PDU_SIZE > 0) ? (MIN_PDU_SIZE - 1) : 0;
+      for (delim_pos = search_start; delim_pos < recv_len; delim_pos++) {
+        if (recv_buf[delim_pos] == '|') {
           found = 1;
           break;
         }
       }
 
       if (!found) {
-        // No hay PDU completa aún
+        // No hay PDU completa aún, esperar más datos
         break;
       }
 
-      size_t pdu_len = i + 1; // posición del '|' + 1
+      size_t pdu_len = delim_pos + 1; // Incluye el delimitador
 
-      if (pdu_len < 9) {
-        // 8 bytes de timestamp + al menos 1 de payload (en la práctica 500).
-        // Si es menor, algo raro pasó: descartamos el primer byte y seguimos.
+      // Validar tamaño máximo
+      if (pdu_len > MAX_PDU_SIZE) {
         fprintf(stderr,
-                "PDU demasiado corta (%zu bytes), descartando un byte\n",
-                pdu_len);
-        memmove(recv_buf, recv_buf + 1, recv_len - 1);
-        recv_len -= 1;
+                "WARN: PDU demasiado larga (%zu bytes, máximo %d). "
+                "Descartando.\n",
+                pdu_len, MAX_PDU_SIZE);
+        invalid_pdus++;
+        size_t remaining = recv_len - pdu_len;
+        if (remaining > 0) {
+          memmove(recv_buf, recv_buf + pdu_len, remaining);
+        }
+        recv_len = remaining;
         continue;
       }
 
-      // Ahora sí: tenemos una PDU completa en recv_buf[0..pdu_len-1].
-      // Recién AHORA tomamos el Destination Timestamp (consigna).
-      uint64_t dest_ts = current_time_ms();
+      // PDU válida: tomar Destination Timestamp AHORA (en microsegundos)
+      uint64_t dest_ts = current_time_micros();
 
-      // Extraer Origin Timestamp de los primeros 8 bytes
-      uint64_t origin_ts = 0;
-      memcpy(&origin_ts, recv_buf, sizeof(origin_ts));
+      // Extraer Origin Timestamp de los primeros 8 bytes (network byte order)
+      uint64_t origin_ts_net;
+      memcpy(&origin_ts_net, recv_buf, sizeof(origin_ts_net));
+      uint64_t origin_ts = ntoh64(origin_ts_net);
 
-      // Calcular one-way delay en segundos
-      double delay_seconds = 0.0;
-      if (dest_ts >= origin_ts) {
-        delay_seconds = (double)(dest_ts - origin_ts) / 1000000.0;
+      // Calcular one-way delay en microsegundos
+      uint64_t delay_us = 0;
+      if ((uint64_t)dest_ts >= origin_ts) {
+        delay_us = (uint64_t)dest_ts - origin_ts;
       } else {
-        // En teoría no debería pasar si los relojes están bien sincronizados,
-        // pero por las dudas lo registramos como negativo.
-        delay_seconds = -(double)(origin_ts - dest_ts) / 1000000.0;
+        // Timestamp negativo (relojes desincronizados o wrap-around)
+        delay_us = (uint64_t)origin_ts - (uint64_t)dest_ts;
       }
-
-      // Loguear en CSV: "idx, delay"
-      fprintf(csv, "%d, %.5f\n", measurement_idx, delay_seconds);
-      fflush(csv);
-
-      printf("Medición %d: delay = %.5f s (origin=%llu, dest=%llu)\n",
-             measurement_idx, delay_seconds, (unsigned long long)origin_ts,
-             (unsigned long long)dest_ts);
 
       measurement_idx++;
 
-      // Mover el resto de bytes (si quedaron más datos después de la PDU)
+      // Loguear en CSV (segundos)
+      fprintf(csv, "%d,%.6f\n", measurement_idx, delay_us / 1000000.0);
+      fflush(csv);
+
+      printf("Medición %d: delay = %" PRIu64 " us (%.3f ms)\n", measurement_idx,
+             delay_us, delay_us / 1000.0);
+
+      // Mover el resto de bytes para la próxima PDU
       size_t remaining = recv_len - pdu_len;
       if (remaining > 0) {
         memmove(recv_buf, recv_buf + pdu_len, remaining);
       }
       recv_len = remaining;
     }
-
-    // Si llegamos acá, puede que aún queden bytes incompletos en recv_buf
-    // que se completarán con próximas lecturas.
   }
+
+  // Estadísticas finales
+  printf("\n=== Estadísticas del servidor ===\n");
+  printf("PDUs válidas recibidas: %d\n", measurement_idx);
+  printf("PDUs inválidas/descartadas: %d\n", invalid_pdus);
 
   close(conn_fd);
   close(listen_fd);

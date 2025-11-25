@@ -1,12 +1,3 @@
-/*
- * Cliente UDP Stop & Wait File Transfer Protocol
- * Uso recomendado: compilar con el Makefile del proyecto.
- *    make client
- *    ./client <server_ip> <filename> <credencial>
- *
- * El filename se usa tanto como nombre local como remoto.
- */
-
 #include <arpa/inet.h>
 #include <asm-generic/errno-base.h>
 #include <errno.h>
