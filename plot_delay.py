@@ -78,7 +78,9 @@ for i, (archivo, etiqueta) in enumerate(archivos.items()):
     if os.path.exists(filepath):
         measurements, delays = leer_csv(filepath)
         datos[archivo] = (measurements, delays)
-
+        delays = [
+            d + 0.859 for d in delays
+        ]  # Ajuste para corregir desfasaje de los relojes
         ax = axes[i]
         ax.plot(measurements, delays, color=colores[archivo], linewidth=0.5, alpha=0.8)
         ax.set_title(etiqueta, fontsize=12, fontweight="bold", color=colores[archivo])
@@ -121,6 +123,9 @@ fig2.patch.set_facecolor("#1a1a2e")
 for archivo, etiqueta in archivos.items():
     if archivo in datos:
         measurements, delays = datos[archivo]
+        delays = [
+            d + 0.859 for d in delays
+        ]  # Ajuste para corregir desfasaje de los relojes
         ax2.plot(
             measurements,
             delays,
