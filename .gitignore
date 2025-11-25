@@ -6,7 +6,7 @@ obj/
 uploads/
 test_p2_outputs/
 *.log
-*.csv
+
 *.bin
 
 # Editor/IDE files
