@@ -195,31 +195,23 @@ int main(int argc, char *argv[]) {
         continue;
       }
 
-      // PDU válida: tomar Destination Timestamp AHORA (en microsegundos)
-      uint64_t dest_ts = current_time_micros();
-
       // Extraer Origin Timestamp de los primeros 8 bytes (network byte order)
       uint64_t origin_ts_net;
       memcpy(&origin_ts_net, recv_buf, sizeof(origin_ts_net));
       uint64_t origin_ts = ntoh64(origin_ts_net);
 
-      // Calcular one-way delay en microsegundos
-      uint64_t delay_us = 0;
-      if ((uint64_t)dest_ts >= origin_ts) {
-        delay_us = (uint64_t)dest_ts - origin_ts;
-      } else {
-        // Timestamp negativo (relojes desincronizados o wrap-around)
-        delay_us = (uint64_t)origin_ts - (uint64_t)dest_ts;
-      }
+      // 2. Tomar Destination Timestamp (ya lo haces bien)
+      uint64_t dest_ts = current_time_micros();
+
+      int64_t raw_delay_us = (int64_t)dest_ts - (int64_t)origin_ts;
 
       measurement_idx++;
-
       // Loguear en CSV (segundos)
-      fprintf(csv, "%d,%.6f\n", measurement_idx, delay_us / 1000000.0);
+      fprintf(csv, "%d,%.6f\n", measurement_idx, raw_delay_us / 1000000.0);
       fflush(csv);
 
-      printf("Medición %d: delay = %" PRIu64 " us (%.3f ms)\n", measurement_idx,
-             delay_us, delay_us / 1000.0);
+      printf("Medición %d: delay = %" PRId64 " us (%.3f ms)\n", measurement_idx,
+             raw_delay_us, raw_delay_us / 1000.0);
 
       // Mover el resto de bytes para la próxima PDU
       size_t remaining = recv_len - pdu_len;
