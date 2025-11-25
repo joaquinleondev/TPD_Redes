@@ -15,3 +15,5 @@ test_p2_outputs/
 .vscode/
 .idea/
 .DS_Store
+
+.venv/
